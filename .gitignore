@@ -1,0 +1,12 @@
+bank-portal/node_modules/
+bank-portal/dist/
+_site/
+.env
+.env.*
+
+# Teller mTLS secrets (never commit)
+teller.zip
+**/*teller*.pem
+**/*.pem
+**/*.key
+**/*.crt

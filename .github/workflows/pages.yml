@@ -1,0 +1,57 @@
+name: Deploy bank-portal to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: bank-portal/package-lock.json
+      - name: Install
+        working-directory: bank-portal
+        run: npm ci
+      - name: Build
+        working-directory: bank-portal
+        env:
+          # Set repo variable VITE_BASE to /your-repo-name/ for project pages; use / for a custom domain root.
+          VITE_BASE: ${{ vars.VITE_BASE }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_TELLER_APP_ID: ${{ secrets.VITE_TELLER_APP_ID }}
+          VITE_TELLER_ENVIRONMENT: ${{ secrets.VITE_TELLER_ENVIRONMENT }}
+        run: npm run build
+      - name: Collect site for Pages
+        run: |
+          mkdir -p _site
+          cp index.html .nojekyll _site/
+          cp -r assets _site/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
