@@ -7,7 +7,7 @@ const anon = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim();
 export const isSupabaseConfigured = Boolean(url && anon);
 
 /** Non-empty strings required by @supabase/supabase-js; use real keys in .env for auth/API. */
-const resolvedUrl = url || "https://configure-your-project.supabase.co";
+export const resolvedSupabaseUrl = url || "https://configure-your-project.supabase.co";
 const resolvedAnon = anon || "sb-publishable-placeholder-not-for-production";
 
 if (!isSupabaseConfigured) {
@@ -16,4 +16,10 @@ if (!isSupabaseConfigured) {
   );
 }
 
-export const supabase = createClient(resolvedUrl, resolvedAnon);
+export const supabase = createClient(resolvedSupabaseUrl, resolvedAnon, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+  },
+});

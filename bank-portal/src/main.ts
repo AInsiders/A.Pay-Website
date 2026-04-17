@@ -1,5 +1,5 @@
 import "./styles.css";
-import { isSupabaseConfigured, supabase } from "./supabase";
+import { isSupabaseConfigured, resolvedSupabaseUrl, supabase } from "./supabase";
 import type { TellerEnrollmentPayload } from "./teller";
 
 type Profile = {
@@ -8,6 +8,31 @@ type Profile = {
   accent_color: string | null;
   theme_mode?: "dark" | "light" | null;
 };
+
+function maskToken(token: string | null | undefined): string {
+  const t = (token ?? "").trim();
+  if (!t) return "—";
+  if (t.length <= 18) return `${t.slice(0, 6)}…${t.slice(-4)}`;
+  return `${t.slice(0, 10)}…${t.slice(-6)}`;
+}
+
+function formatAuthError(prefix: string, err: unknown): string {
+  if (err instanceof Error) {
+    const msg = err.message || String(err);
+    if (/failed to fetch/i.test(msg)) {
+      const host = (() => {
+        try {
+          return new URL(resolvedSupabaseUrl).host;
+        } catch {
+          return resolvedSupabaseUrl;
+        }
+      })();
+      return `${prefix}: Failed to fetch. Usually network/CORS or invalid Supabase URL. Check VITE_SUPABASE_URL (currently: ${host}).`;
+    }
+    return `${prefix}: ${msg}`;
+  }
+  return `${prefix}: ${String(err)}`;
+}
 
 const THEME_PRESETS: { id: string; label: string; hex: string }[] = [
   { id: "mint", label: "Cash mint", hex: "#5ee7ff" },
@@ -29,6 +54,8 @@ const state: {
   busy: boolean;
   /** Guest landing: sign-in modal visibility */
   authModalOpen: boolean;
+  /** When user returned from a password recovery email link. */
+  recoveryMode: boolean;
 } = {
   session: null,
   profile: null,
@@ -39,6 +66,7 @@ const state: {
   info: null,
   busy: false,
   authModalOpen: false,
+  recoveryMode: false,
 };
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -134,24 +162,23 @@ async function refreshBankData() {
   state.busy = true;
   state.error = null;
   render();
-  const { data, error } = await supabase.functions.invoke("teller-data", {
-    body: { action: "accounts" },
-  });
+  try {
+    const { data, error } = await supabase.functions.invoke("teller-data", {
+      body: { action: "accounts" },
+    });
+    if (error) throw error;
+    const payload = data as { accounts?: unknown[]; error?: string };
+    if (payload?.error) throw new Error(payload.error);
+    state.accounts = payload.accounts ?? [];
+  } catch (e) {
+    state.error = formatAuthError("Bank sync", e);
+    state.accounts = [];
+    state.transactions = [];
+    state.busy = false;
+    render();
+    return;
+  }
   state.busy = false;
-  if (error) {
-    state.error = error.message;
-    state.accounts = [];
-    render();
-    return;
-  }
-  const payload = data as { accounts?: unknown[]; error?: string };
-  if (payload?.error) {
-    state.error = payload.error;
-    state.accounts = [];
-    render();
-    return;
-  }
-  state.accounts = payload.accounts ?? [];
   if (!state.selectedAccountId && state.accounts.length) {
     const first = state.accounts[0] as { id?: string };
     state.selectedAccountId = first.id ?? null;
@@ -168,33 +195,33 @@ async function loadTransactions() {
   state.busy = true;
   state.error = null;
   render();
-  const { data, error } = await supabase.functions.invoke("teller-data", {
-    body: { action: "transactions", accountId: state.selectedAccountId },
-  });
-  state.busy = false;
-  if (error) {
-    state.error = error.message;
+  try {
+    const { data, error } = await supabase.functions.invoke("teller-data", {
+      body: { action: "transactions", accountId: state.selectedAccountId },
+    });
+    if (error) throw error;
+    const payload = data as { transactions?: unknown[]; error?: string };
+    if (payload?.error) throw new Error(payload.error);
+    state.transactions = payload.transactions ?? [];
+  } catch (e) {
+    state.error = formatAuthError("Transaction load", e);
     state.transactions = [];
+  } finally {
+    state.busy = false;
     render();
-    return;
   }
-  const payload = data as { transactions?: unknown[]; error?: string };
-  if (payload?.error) {
-    state.error = payload.error;
-    state.transactions = [];
-    render();
-    return;
-  }
-  state.transactions = payload.transactions ?? [];
-  render();
 }
 
 async function fetchNonce(): Promise<string> {
-  const { data, error } = await supabase.functions.invoke("teller-nonce", { body: {} });
-  if (error) throw new Error(error.message);
-  const n = (data as { nonce?: string })?.nonce;
-  if (!n) throw new Error("No nonce returned");
-  return n;
+  try {
+    const { data, error } = await supabase.functions.invoke("teller-nonce", { body: {} });
+    if (error) throw error;
+    const n = (data as { nonce?: string })?.nonce;
+    if (!n) throw new Error("No nonce returned");
+    return n;
+  } catch (e) {
+    throw new Error(formatAuthError("Teller nonce", e));
+  }
 }
 
 function tellerEnvironment(): string {
@@ -292,6 +319,13 @@ const LANDING_HERO_IMG =
   "https://images.unsplash.com/photo-1530651788726-238dfa2d8d5c?auto=format&fit=crop&w=1920&q=85";
 
 function renderAuth() {
+  const supabaseHost = (() => {
+    try {
+      return new URL(resolvedSupabaseUrl).host;
+    } catch {
+      return resolvedSupabaseUrl;
+    }
+  })();
   return `
     <div class="fx-root fx-root--landing">
       <div class="fx-grid" aria-hidden="true"></div>
@@ -374,9 +408,34 @@ function renderAuth() {
               <button type="submit" class="fx-btn-block" ${state.busy ? "disabled" : ""}>Enter A.Pay</button>
               <button type="button" class="secondary fx-btn-block" id="btn-signup" ${state.busy ? "disabled" : ""}>Create account</button>
             </div>
+            <div class="row row--stretch">
+              <button type="button" class="secondary fx-btn-block" id="btn-magiclink" ${state.busy ? "disabled" : ""}>Email me a magic link</button>
+              <button type="button" class="secondary fx-btn-block" id="btn-forgot" ${state.busy ? "disabled" : ""}>Forgot password</button>
+            </div>
+            <p class="muted" style="margin:6px 0 0">
+              Supabase: <strong>${escapeHtml(isSupabaseConfigured ? supabaseHost : "Not configured (preview mode)")}</strong>
+            </p>
             ${state.info ? `<p class="success">${escapeHtml(state.info)}</p>` : ""}
             ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
           </form>
+
+          ${
+            state.recoveryMode
+              ? `
+                <hr style="border:0;border-top:1px solid rgba(255,255,255,.08);margin:14px 0" />
+                <form id="form-recovery" class="fx-auth-modal__form list">
+                  <p class="muted" style="margin:0">Set a new password to finish recovery.</p>
+                  <label class="field">New password<input name="new_password" type="password" autocomplete="new-password" required placeholder="••••••••" /></label>
+                  <label class="field">Confirm new password<input name="new_password_confirm" type="password" autocomplete="new-password" required placeholder="••••••••" /></label>
+                  <div class="row row--stretch">
+                    <button type="submit" class="fx-btn-block" ${state.busy ? "disabled" : ""}>Update password</button>
+                  </div>
+                  ${state.info ? `<p class="success">${escapeHtml(state.info)}</p>` : ""}
+                  ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
+                </form>
+              `
+              : ""
+          }
         </div>
       </div>
 
@@ -441,6 +500,12 @@ function renderApp() {
   const profile = state.profile;
   const accent = profile?.accent_color ?? DEFAULT_ACCENT;
   const mode = profile?.theme_mode === "light" ? "light" : "dark";
+  const user = state.session?.user;
+  const identity = user?.identities?.[0];
+  const provider = (identity?.provider as string | undefined) ?? (user?.app_metadata as { provider?: string } | undefined)?.provider;
+  const lastSignIn = (user as { last_sign_in_at?: string } | null)?.last_sign_in_at ?? null;
+  const createdAt = (user as { created_at?: string } | null)?.created_at ?? null;
+  const accessToken = maskToken(state.session?.access_token);
   const rows = (state.accounts as Record<string, unknown>[]).map((a) => {
     const id = String(a.id ?? "");
     const sel = id === state.selectedAccountId ? "secondary" : "";
@@ -528,6 +593,33 @@ function renderApp() {
                 ${state.info ? `<p class="success">${escapeHtml(state.info)}</p>` : ""}
                 ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
               </form>
+            </section>
+
+            <section class="fx-panel">
+              <p class="fx-eyebrow">Signed-in</p>
+              <h2>Your account</h2>
+              <div class="list">
+                <div class="card">
+                  <p class="muted" style="margin:0 0 8px">These details help debug auth + fetch issues.</p>
+                  <div class="row" style="justify-content:space-between;gap:10px;flex-wrap:wrap">
+                    <span class="fx-pill">Email: <strong>${escapeHtml(user?.email ?? "—")}</strong></span>
+                    <span class="fx-pill">User ID: <strong>${escapeHtml(user?.id ?? "—")}</strong></span>
+                  </div>
+                  <div class="row" style="justify-content:space-between;gap:10px;flex-wrap:wrap;margin-top:10px">
+                    <span class="fx-pill">Provider: <strong>${escapeHtml(provider ?? "email")}</strong></span>
+                    <span class="fx-pill">Access token: <strong>${escapeHtml(accessToken)}</strong></span>
+                  </div>
+                  <div class="row" style="justify-content:space-between;gap:10px;flex-wrap:wrap;margin-top:10px">
+                    <span class="fx-pill">Created: <strong>${escapeHtml(createdAt ? new Date(createdAt).toLocaleString() : "—")}</strong></span>
+                    <span class="fx-pill">Last sign-in: <strong>${escapeHtml(lastSignIn ? new Date(lastSignIn).toLocaleString() : "—")}</strong></span>
+                  </div>
+                </div>
+              </div>
+              ${
+                !isSupabaseConfigured
+                  ? `<p class="error" style="margin-top:12px">Supabase is in preview mode (missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY). Function calls will fail until set.</p>`
+                  : ""
+              }
             </section>
 
             <section class="fx-panel">
@@ -686,6 +778,11 @@ function wireAuth() {
 
   const form = document.querySelector<HTMLFormElement>("#form-signin");
   const signup = document.querySelector<HTMLButtonElement>("#btn-signup");
+  const magic = document.querySelector<HTMLButtonElement>("#btn-magiclink");
+  const forgot = document.querySelector<HTMLButtonElement>("#btn-forgot");
+  const recoveryForm = document.querySelector<HTMLFormElement>("#form-recovery");
+
+  const redirectTo = `${new URL(import.meta.env.BASE_URL, window.location.origin)}`;
   form?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(form);
@@ -703,6 +800,103 @@ function wireAuth() {
       render();
       return;
     }
+  });
+  magic?.addEventListener("click", async () => {
+    const formEl = document.querySelector<HTMLFormElement>("#form-signin");
+    if (!formEl) return;
+    const fd = new FormData(formEl);
+    const email = String(fd.get("email") ?? "").trim();
+    if (!email) {
+      state.error = "Enter your email first.";
+      state.authModalOpen = true;
+      render();
+      return;
+    }
+    state.busy = true;
+    state.error = null;
+    state.info = null;
+    state.authModalOpen = true;
+    render();
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: redirectTo },
+    });
+    state.busy = false;
+    if (error) {
+      state.error = error.message;
+      state.authModalOpen = true;
+      render();
+      return;
+    }
+    state.info = "Magic link sent. Check your email.";
+    state.authModalOpen = true;
+    render();
+  });
+  forgot?.addEventListener("click", async () => {
+    const formEl = document.querySelector<HTMLFormElement>("#form-signin");
+    if (!formEl) return;
+    const fd = new FormData(formEl);
+    const email = String(fd.get("email") ?? "").trim();
+    if (!email) {
+      state.error = "Enter your email first.";
+      state.authModalOpen = true;
+      render();
+      return;
+    }
+    state.busy = true;
+    state.error = null;
+    state.info = null;
+    state.authModalOpen = true;
+    render();
+    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+    state.busy = false;
+    if (error) {
+      state.error = error.message;
+      state.authModalOpen = true;
+      render();
+      return;
+    }
+    state.info = "Password reset email sent.";
+    state.authModalOpen = true;
+    render();
+  });
+
+  recoveryForm?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(recoveryForm);
+    const a = String(fd.get("new_password") ?? "");
+    const b = String(fd.get("new_password_confirm") ?? "");
+    if (a.length < 8) {
+      state.error = "Use at least 8 characters for the password.";
+      state.authModalOpen = true;
+      render();
+      return;
+    }
+    if (a !== b) {
+      state.error = "Passwords do not match.";
+      state.authModalOpen = true;
+      render();
+      return;
+    }
+    state.busy = true;
+    state.error = null;
+    state.info = null;
+    state.authModalOpen = true;
+    render();
+    const { error } = await supabase.auth.updateUser({ password: a });
+    state.busy = false;
+    if (error) {
+      state.error = error.message;
+      state.authModalOpen = true;
+      render();
+      return;
+    }
+    state.recoveryMode = false;
+    state.info = "Password updated. You can continue signing in.";
+    // Remove recovery tokens from the URL.
+    history.replaceState({}, document.title, `${window.location.pathname}${window.location.search}`);
+    state.authModalOpen = true;
+    render();
   });
   signup?.addEventListener("click", async () => {
     const formEl = document.querySelector<HTMLFormElement>("#form-signin");
@@ -828,6 +1022,14 @@ async function init() {
   applyFullTheme(null);
 
   try {
+    // If user lands from a password recovery email, Supabase will detect tokens in URL.
+    // We also surface the recovery UI so the user can set a new password.
+    const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
+    const hashParams = new URLSearchParams(hash);
+    const flowType = hashParams.get("type") || hashParams.get("flow_type");
+    state.recoveryMode = flowType === "recovery";
+    if (state.recoveryMode) state.authModalOpen = true;
+
     const { data } = await supabase.auth.getSession();
     state.session = data.session;
     if (state.session?.user) {
