@@ -6,6 +6,7 @@ type Profile = {
   id: string;
   display_name: string | null;
   accent_color: string | null;
+  theme_mode?: "dark" | "light" | null;
 };
 
 const THEME_PRESETS: { id: string; label: string; hex: string }[] = [
@@ -47,6 +48,13 @@ let landingParallaxTeardown: (() => void) | null = null;
 
 const DEFAULT_ACCENT = "#5ee7ff";
 
+function applyMode(mode: Profile["theme_mode"]) {
+  const m = mode === "light" ? "light" : "dark";
+  document.documentElement.dataset.mode = m;
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (meta) meta.content = m === "light" ? "#f8fafc" : "#050810";
+}
+
 function applyFullTheme(hex: string | null) {
   const root = document.documentElement;
   const v = hex?.trim();
@@ -74,6 +82,7 @@ async function loadProfile(userId: string) {
   if (error) throw error;
   if (data) {
     state.profile = data as Profile;
+    applyMode(state.profile.theme_mode);
     applyFullTheme(state.profile.accent_color);
     return;
   }
@@ -82,14 +91,18 @@ async function loadProfile(userId: string) {
     id: userId,
     display_name: email.split("@")[0] ?? "User",
     accent_color: DEFAULT_ACCENT,
+    theme_mode: "dark" as const,
   };
   const { data: created, error: insErr } = await supabase.from("profiles").insert(insert).select().single();
   if (insErr) throw insErr;
   state.profile = created as Profile;
+  applyMode(insert.theme_mode);
   applyFullTheme(insert.accent_color);
 }
 
-async function saveProfile(partial: Partial<Pick<Profile, "display_name" | "accent_color">>) {
+async function saveProfile(
+  partial: Partial<Pick<Profile, "display_name" | "accent_color" | "theme_mode">>,
+) {
   if (!state.session?.user.id) return;
   state.busy = true;
   state.error = null;
@@ -106,6 +119,7 @@ async function saveProfile(partial: Partial<Pick<Profile, "display_name" | "acce
     return;
   }
   state.profile = data as Profile;
+  applyMode(state.profile.theme_mode);
   applyFullTheme(state.profile.accent_color);
   state.info = "Appearance saved.";
   render();
@@ -426,6 +440,7 @@ function themePresetButtons(currentHex: string): string {
 function renderApp() {
   const profile = state.profile;
   const accent = profile?.accent_color ?? DEFAULT_ACCENT;
+  const mode = profile?.theme_mode === "light" ? "light" : "dark";
   const rows = (state.accounts as Record<string, unknown>[]).map((a) => {
     const id = String(a.id ?? "");
     const sel = id === state.selectedAccountId ? "secondary" : "";
@@ -497,6 +512,16 @@ function renderApp() {
               <form id="form-profile" class="list">
                 <label class="field">Display name<input name="display_name" type="text" value="${escapeHtml(profile?.display_name ?? "")}" placeholder="First name or nickname" /></label>
                 <input type="hidden" name="accent_color" id="field-accent" value="${escapeHtml(accent)}" />
+                <div class="field">
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+                    <span style="font-weight:600">Mode</span>
+                    <div class="fx-seg" role="group" aria-label="Theme mode">
+                      <button type="button" class="fx-seg__btn${mode === "dark" ? " is-active" : ""}" data-mode="dark" aria-pressed="${mode === "dark" ? "true" : "false"}">Dark</button>
+                      <button type="button" class="fx-seg__btn${mode === "light" ? " is-active" : ""}" data-mode="light" aria-pressed="${mode === "light" ? "true" : "false"}">Light</button>
+                    </div>
+                  </div>
+                  <input type="hidden" name="theme_mode" id="field-mode" value="${escapeHtml(mode)}" />
+                </div>
                 <div class="row" style="margin-top:4px">
                   <button type="submit" ${state.busy ? "disabled" : ""}>Save profile</button>
                 </div>
@@ -720,6 +745,7 @@ function wireAuth() {
 function wireApp() {
   const accentInput = document.querySelector<HTMLInputElement>("#field-accent");
   const colorPicker = document.querySelector<HTMLInputElement>("#field-color-picker");
+  const modeInput = document.querySelector<HTMLInputElement>("#field-mode");
 
   document.querySelector<HTMLButtonElement>("#btn-signout")?.addEventListener("click", async () => {
     state.busy = true;
@@ -741,8 +767,20 @@ function wireApp() {
     const fd = new FormData(form);
     const display_name = String(fd.get("display_name") ?? "").trim();
     const accent_color = String(fd.get("accent_color") ?? colorPicker?.value ?? "").trim();
+    const theme_mode = String(fd.get("theme_mode") ?? "dark").trim() === "light" ? "light" : "dark";
     applyFullTheme(accent_color);
-    await saveProfile({ display_name: display_name || null, accent_color });
+    applyMode(theme_mode);
+    await saveProfile({ display_name: display_name || null, accent_color, theme_mode });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const m = btn.getAttribute("data-mode") === "light" ? "light" : "dark";
+      if (modeInput) modeInput.value = m;
+      applyMode(m);
+      document.querySelectorAll(".fx-seg__btn").forEach((b) => b.classList.remove("is-active"));
+      btn.classList.add("is-active");
+    });
   });
 
   document.querySelectorAll<HTMLButtonElement>("[data-theme-hex]").forEach((btn) => {

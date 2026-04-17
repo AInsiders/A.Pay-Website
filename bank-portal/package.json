@@ -13,6 +13,8 @@
     "@supabase/supabase-js": "^2.49.4"
   },
   "devDependencies": {
+    "@vitejs/plugin-legacy": "^6.1.1",
+    "terser": "^5.46.1",
     "typescript": "^5.8.3",
     "vite": "^6.3.5"
   }
