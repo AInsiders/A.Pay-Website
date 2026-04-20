@@ -1,5 +1,10 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import legacy from "@vitejs/plugin-legacy";
+
+/** Config file lives in bank-portal/ — pin root + env so `.env` loads here even if `vite` is run from the repo root. */
+const portalRoot = path.dirname(fileURLToPath(import.meta.url));
 
 // For GitHub Pages project sites, set VITE_BASE=/your-repo-name/ (leading and trailing slashes).
 const raw = process.env.VITE_BASE;
@@ -8,6 +13,8 @@ const raw = process.env.VITE_BASE;
 const base = raw && raw.trim() !== "" ? raw : "./";
 
 export default defineConfig({
+  root: portalRoot,
+  envDir: portalRoot,
   base,
   plugins: [
     legacy({
