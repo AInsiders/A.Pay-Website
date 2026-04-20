@@ -67,7 +67,7 @@ In Supabase → **Edge Functions** → **Secrets**, set at least:
 Also add GitHub **Actions secrets** for the **static build** (same names as local):
 
 - `VITE_TELLER_APP_ID`
-- `VITE_TELLER_ENVIRONMENT` (e.g. `sandbox`)
+- `VITE_TELLER_ENVIRONMENT` (`sandbox` for fake banks; `development` or `production` for real accounts—match the Teller Dashboard)
 
 Point Teller webhooks to:  
 `https://YOUR_PROJECT_REF.supabase.co/functions/v1/teller-webhook`

@@ -77,7 +77,7 @@ Deno.serve(async (req) => {
   }
 
   const nonce = body.nonce?.trim();
-  const environment = (body.environment ?? "sandbox").trim();
+  const environment = (body.environment ?? "development").trim();
   const payload = body.payload;
   const accessToken = payload?.accessToken?.trim();
   const userId = payload?.user?.id?.trim();

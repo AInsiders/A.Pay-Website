@@ -60,7 +60,7 @@ Copy `bank-portal/.env.example` to `bank-portal/.env` and fill in:
 
 - `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`
 - `VITE_TELLER_APP_ID`
-- `VITE_TELLER_ENVIRONMENT` (`sandbox` until you move to development/production)
+- `VITE_TELLER_ENVIRONMENT` (`sandbox` = fake institutions; `development` or `production` = real banks—must match your Teller app)
 
 ```bash
 cd bank-portal

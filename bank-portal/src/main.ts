@@ -16,22 +16,31 @@ function maskToken(token: string | null | undefined): string {
   return `${t.slice(0, 10)}…${t.slice(-6)}`;
 }
 
-function formatAuthError(prefix: string, err: unknown): string {
-  if (err instanceof Error) {
-    const msg = err.message || String(err);
-    if (/failed to fetch/i.test(msg)) {
-      const host = (() => {
-        try {
-          return new URL(resolvedSupabaseUrl).host;
-        } catch {
-          return resolvedSupabaseUrl;
-        }
-      })();
-      return `${prefix}: Failed to fetch. Usually network/CORS or invalid Supabase URL. Check VITE_SUPABASE_URL (currently: ${host}).`;
-    }
-    return `${prefix}: ${msg}`;
+function supabaseHostHint(): string {
+  try {
+    return new URL(resolvedSupabaseUrl).host;
+  } catch {
+    return resolvedSupabaseUrl;
   }
-  return `${prefix}: ${String(err)}`;
+}
+
+function formatAuthError(prefix: string, err: unknown): string {
+  const host = supabaseHostHint();
+  const raw = err instanceof Error ? err.message || String(err) : String(err);
+
+  if (/failed to fetch/i.test(raw)) {
+    return `${prefix}: Failed to fetch. Usually network/CORS or invalid Supabase URL. Check VITE_SUPABASE_URL (currently: ${host}).`;
+  }
+
+  // @supabase/supabase-js when `fetch` to Edge Functions throws before any HTTP response
+  if (/failed to send a request to the edge function/i.test(raw)) {
+    return `${prefix}: Could not reach Edge Functions at ${host}. Often: offline, VPN/firewall, browser extension blocking requests, or the Supabase project is paused. Try another network, a private window, and DevTools → Network for a failed …/functions/v1/ request.`;
+  }
+
+  if (err instanceof Error) {
+    return `${prefix}: ${raw}`;
+  }
+  return `${prefix}: ${raw}`;
 }
 
 /** Supabase `functions.invoke` hides Edge Function JSON in `FunctionsHttpError.context` — unpack it. */
@@ -289,7 +298,8 @@ async function fetchNonce(): Promise<string> {
 }
 
 function tellerEnvironment(): string {
-  return import.meta.env.VITE_TELLER_ENVIRONMENT || "sandbox";
+  // sandbox = Teller fake institutions; development | production = real FI data (per Teller app settings).
+  return import.meta.env.VITE_TELLER_ENVIRONMENT?.trim() || "development";
 }
 
 /** True when the SPA was built with a Teller application id (required for Connect). */
@@ -732,8 +742,11 @@ function renderApp() {
               <p class="fx-eyebrow">Bank link</p>
               <h2>Feed your forecast real data</h2>
               <p class="muted">
-                Connect with Teller so deposits, bills, and spending show up where you’re planning. Start in
-                <strong>sandbox</strong> until your Teller app is in development or production.
+                Connect with Teller so deposits, bills, and spending show up where you’re planning. Environment is
+                <strong>${escapeHtml(tellerEnvironment())}</strong>
+                (${tellerEnvironment() === "sandbox" ? "fake institutions" : "real institutions your Teller app is allowed to use"}). Set
+                <code>VITE_TELLER_ENVIRONMENT</code> in <code>bank-portal/.env</code> to <code>sandbox</code>,
+                <code>development</code>, or <code>production</code>, then restart dev or rebuild.
               </p>
               <div class="row">
                 <button type="button" id="btn-teller" ${state.busy ? "disabled" : ""}>Connect my bank</button>
