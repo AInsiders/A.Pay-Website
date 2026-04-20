@@ -292,6 +292,11 @@ function tellerEnvironment(): string {
   return import.meta.env.VITE_TELLER_ENVIRONMENT || "sandbox";
 }
 
+/** True when the SPA was built with a Teller application id (required for Connect). */
+function tellerConfigured(): boolean {
+  return Boolean(import.meta.env.VITE_TELLER_APP_ID?.trim());
+}
+
 function tellerAppId(): string {
   const id = import.meta.env.VITE_TELLER_APP_ID?.trim();
   if (!id) throw new Error("Missing VITE_TELLER_APP_ID");
@@ -304,60 +309,71 @@ async function startTellerConnect() {
     render();
     return;
   }
+  if (!tellerConfigured()) {
+    state.error =
+      "Missing VITE_TELLER_APP_ID. Add your Teller application ID to bank-portal/.env, run npm run dev (or npm run build), and reload.";
+    render();
+    return;
+  }
   if (!window.TellerConnect?.setup) {
-    state.error = "Teller Connect failed to load.";
+    state.error =
+      "Teller Connect did not load. Check the network tab for https://cdn.teller.io/connect/connect.js (ad blockers and strict CSP can block it).";
     render();
     return;
   }
   state.busy = true;
   state.error = null;
   render();
-  let nonce: string;
   try {
-    nonce = await fetchNonce();
+    const nonce = await fetchNonce();
+    state.busy = false;
+    render();
+
+    const tc = window.TellerConnect.setup({
+      applicationId: tellerAppId(),
+      environment: tellerEnvironment(),
+      products: ["balance", "transactions"],
+      nonce,
+      onSuccess: async (enrollment: TellerEnrollmentPayload) => {
+        state.busy = true;
+        state.error = null;
+        render();
+        const headers = await bearerAuthHeaders();
+        const { error } = await supabase.functions.invoke("teller-enrollment-complete", {
+          body: { nonce, environment: tellerEnvironment(), payload: enrollment },
+          headers,
+        });
+        state.busy = false;
+        if (error) {
+          state.error = await edgeFunctionMessage(error);
+          render();
+          return;
+        }
+        state.info = "Bank connected.";
+        render();
+        await refreshBankData();
+        setTimeout(() => {
+          state.info = null;
+          render();
+        }, 2500);
+      },
+      onExit: () => {
+        state.busy = false;
+        render();
+      },
+      onFailure: (failure) => {
+        state.busy = false;
+        const msg = failure?.message?.trim();
+        state.error = msg ? `Teller Connect: ${msg}` : "Teller Connect reported an error.";
+        render();
+      },
+    });
+    tc.open();
   } catch (e) {
     state.busy = false;
     state.error = e instanceof Error ? e.message : String(e);
     render();
-    return;
   }
-  state.busy = false;
-  render();
-
-  const tc = window.TellerConnect.setup({
-    applicationId: tellerAppId(),
-    environment: tellerEnvironment(),
-    products: ["balance", "transactions"],
-    nonce,
-    onSuccess: async (enrollment: TellerEnrollmentPayload) => {
-      state.busy = true;
-      state.error = null;
-      render();
-      const headers = await bearerAuthHeaders();
-      const { error } = await supabase.functions.invoke("teller-enrollment-complete", {
-        body: { nonce, environment: tellerEnvironment(), payload: enrollment },
-        headers,
-      });
-      state.busy = false;
-      if (error) {
-        state.error = await edgeFunctionMessage(error);
-        render();
-        return;
-      }
-      state.info = "Bank connected.";
-      render();
-      await refreshBankData();
-      setTimeout(() => {
-        state.info = null;
-        render();
-      }, 2500);
-    },
-    onExit: () => {
-      state.busy = false;
-      render();
-    },
-  });
-  tc.open();
 }
 
 function escapeHtml(s: string) {
@@ -643,6 +659,7 @@ function renderApp() {
             ? `<div class="banner">A.Pay preview: add <strong>.env</strong> with <strong>VITE_SUPABASE_URL</strong> and <strong>VITE_SUPABASE_ANON_KEY</strong> so sign-in and bank link work end-to-end.</div>`
             : ""
         }
+        ${state.error ? `<div class="banner banner--alert" role="alert">${escapeHtml(state.error)}</div>` : ""}
 
         <div class="fx-layout fx-layout--split">
           <div class="fx-stack">
@@ -667,7 +684,6 @@ function renderApp() {
                   <button type="submit" ${state.busy ? "disabled" : ""}>Save profile</button>
                 </div>
                 ${state.info ? `<p class="success">${escapeHtml(state.info)}</p>` : ""}
-                ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
               </form>
             </section>
 
@@ -723,7 +739,11 @@ function renderApp() {
                 <button type="button" id="btn-teller" ${state.busy ? "disabled" : ""}>Connect my bank</button>
                 <button type="button" class="secondary" id="btn-refresh" ${state.busy ? "disabled" : ""}>Refresh data</button>
               </div>
-              ${state.error && state.accounts.length === 0 ? `<p class="error" style="margin-top:12px">${escapeHtml(state.error)}</p>` : ""}
+              ${
+                !tellerConfigured()
+                  ? `<p class="error" style="margin-top:12px">Bank link needs <strong>VITE_TELLER_APP_ID</strong> in <code>bank-portal/.env</code> (restart dev or rebuild; required at build time for production).</p>`
+                  : ""
+              }
             </section>
 
             <section class="fx-panel">

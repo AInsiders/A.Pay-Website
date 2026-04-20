@@ -1537,6 +1537,12 @@ button:disabled {
   margin-bottom: 18px;
 }
 
+.banner--alert {
+  border-color: rgba(255, 130, 150, 0.35);
+  background: rgba(255, 70, 100, 0.1);
+  color: #ffd8df;
+}
+
 .error {
   color: #ffb8c8;
   font-size: 0.88rem;

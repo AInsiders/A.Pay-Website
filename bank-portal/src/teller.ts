@@ -12,6 +12,13 @@ export interface TellerConnectInstance {
   open: () => void;
 }
 
+/** Emitted when Connect closes after an in-flow error (see Teller Connect docs). */
+export type TellerConnectFailure = {
+  type?: string;
+  code?: string;
+  message?: string;
+};
+
 export interface TellerConnectSetupOptions {
   applicationId: string;
   environment?: string;
@@ -21,6 +28,7 @@ export interface TellerConnectSetupOptions {
   onSuccess: (payload: TellerEnrollmentPayload) => void;
   onExit?: () => void;
   onInit?: () => void;
+  onFailure?: (failure: TellerConnectFailure) => void;
 }
 
 declare global {
