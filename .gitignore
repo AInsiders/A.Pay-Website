@@ -1,8 +1,12 @@
 bank-portal/node_modules/
 bank-portal/dist/
 _site/
+supabase/.temp/
+supabase/.branches/
+
 .env
 .env.*
+!.env.example
 
 # Teller mTLS secrets (never commit)
 teller.zip

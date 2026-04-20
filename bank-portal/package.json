@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "check:env": "node scripts/check-env.mjs",
     "dev": "vite",
     "prebuild": "node scripts/clean-site-output.mjs",
     "build": "vite build",

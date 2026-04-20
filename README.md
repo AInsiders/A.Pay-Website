@@ -1,5 +1,7 @@
 # Bank portal (Supabase + Teller + GitHub Pages)
 
+**First-time setup (secrets + dashboard steps):** see **[SETUP.md](./SETUP.md)** — minimal checklist of what you must paste into Supabase and GitHub.
+
 This folder contains a small static web app that signs users in with **Supabase Auth**, saves profile/theme data in **Postgres**, connects banks through **Teller Connect**, and lists **accounts and transactions** via **Supabase Edge Functions** (server-side token + optional mTLS).
 
 ## What was added
@@ -51,6 +53,8 @@ In the Teller Dashboard, point webhooks to:
 The sample handler verifies the `Teller-Signature` header and deletes the enrollment row when Teller sends `enrollment.disconnected`.
 
 ## 3. Local / CI build (`bank-portal`)
+
+Auth, database, and Edge Functions all live in **Supabase**. The Vite build is a **static** site (HTML/JS only)—serve it from GitHub Pages or any static host; you do **not** need a separate app platform.
 
 Copy `bank-portal/.env.example` to `bank-portal/.env` and fill in:
 
