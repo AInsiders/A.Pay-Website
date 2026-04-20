@@ -364,6 +364,21 @@ authorization_url_path = "/oauth/consent"
 # Allow dynamic client registration
 allow_dynamic_registration = false
 
+# Edge gateway JWT check only supports legacy HS256. New projects may use ES256
+# (asymmetric keys) — the gateway then returns 401 before your code runs.
+# These handlers still authenticate via supabaseUserClient(req).auth.getUser().
+[functions.teller-nonce]
+verify_jwt = false
+
+[functions.teller-data]
+verify_jwt = false
+
+[functions.teller-enrollment-complete]
+verify_jwt = false
+
+[functions.teller-webhook]
+verify_jwt = false
+
 [edge_runtime]
 enabled = true
 # Supported request policies: `oneshot`, `per_worker`.

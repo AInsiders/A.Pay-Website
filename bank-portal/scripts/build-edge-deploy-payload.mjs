@@ -20,10 +20,13 @@ function rewriteImports(src) {
   return src.replaceAll('"../_shared/', '"./_shared/');
 }
 
+// verify_jwt=false: hosted gateway only validates legacy HS256; projects using ES256
+// asymmetric signing keys get 401 "Unsupported JWT algorithm ES256". Auth still
+// enforced in code via supabaseUserClient(req).auth.getUser().
 const bundles = {
   "teller-nonce": {
     name: "teller-nonce",
-    verify_jwt: true,
+    verify_jwt: false,
     files: [
       { name: "index.ts", content: rewriteImports(readFileSync(join(root, "teller-nonce", "index.ts"), "utf8")) },
       { name: "_shared/cors.ts", content: shared.cors },
@@ -32,7 +35,7 @@ const bundles = {
   },
   "teller-data": {
     name: "teller-data",
-    verify_jwt: true,
+    verify_jwt: false,
     files: [
       { name: "index.ts", content: rewriteImports(readFileSync(join(root, "teller-data", "index.ts"), "utf8")) },
       { name: "_shared/cors.ts", content: shared.cors },
@@ -42,7 +45,7 @@ const bundles = {
   },
   "teller-enrollment-complete": {
     name: "teller-enrollment-complete",
-    verify_jwt: true,
+    verify_jwt: false,
     files: [
       {
         name: "index.ts",
