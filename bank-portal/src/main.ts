@@ -34,6 +34,23 @@ function formatAuthError(prefix: string, err: unknown): string {
   return `${prefix}: ${String(err)}`;
 }
 
+/** Supabase `functions.invoke` hides Edge Function JSON in `FunctionsHttpError.context` — unpack it. */
+async function edgeFunctionMessage(err: unknown): Promise<string> {
+  if (err && typeof err === "object" && "context" in err) {
+    const ctx = (err as { context?: Response }).context;
+    if (ctx && typeof ctx.json === "function") {
+      try {
+        const body = (await ctx.clone().json()) as { error?: string };
+        if (typeof body?.error === "string" && body.error.length) return body.error;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
 const THEME_PRESETS: { id: string; label: string; hex: string }[] = [
   { id: "mint", label: "Cash mint", hex: "#5ee7ff" },
   { id: "bullion", label: "Gold vault", hex: "#e8c547" },
@@ -166,7 +183,7 @@ async function refreshBankData() {
     const { data, error } = await supabase.functions.invoke("teller-data", {
       body: { action: "accounts" },
     });
-    if (error) throw error;
+    if (error) throw new Error(await edgeFunctionMessage(error));
     const payload = data as { accounts?: unknown[]; error?: string };
     if (payload?.error) throw new Error(payload.error);
     state.accounts = payload.accounts ?? [];
@@ -199,7 +216,7 @@ async function loadTransactions() {
     const { data, error } = await supabase.functions.invoke("teller-data", {
       body: { action: "transactions", accountId: state.selectedAccountId },
     });
-    if (error) throw error;
+    if (error) throw new Error(await edgeFunctionMessage(error));
     const payload = data as { transactions?: unknown[]; error?: string };
     if (payload?.error) throw new Error(payload.error);
     state.transactions = payload.transactions ?? [];
@@ -215,7 +232,7 @@ async function loadTransactions() {
 async function fetchNonce(): Promise<string> {
   try {
     const { data, error } = await supabase.functions.invoke("teller-nonce", { body: {} });
-    if (error) throw error;
+    if (error) throw new Error(await edgeFunctionMessage(error));
     const n = (data as { nonce?: string })?.nonce;
     if (!n) throw new Error("No nonce returned");
     return n;
@@ -274,7 +291,7 @@ async function startTellerConnect() {
       });
       state.busy = false;
       if (error) {
-        state.error = error.message;
+        state.error = await edgeFunctionMessage(error);
         render();
         return;
       }

@@ -34,7 +34,8 @@ In Supabase → **Authentication** → **URL Configuration**:
 
 - **Site URL:** your real site (e.g. `https://you.github.io/repo/` or production domain).
 - **Redirect URLs:** add at least:
-  - `http://localhost:5173/**` (local dev)
+  - `http://localhost:5173/**` (`npm run dev`)
+  - `http://localhost:4173/**` (`npm run preview` after a build — default Vite preview port)
   - `https://you.github.io/repo/**` (match your Pages URL)
 
 ### 3. Database migrations (run once per project)
@@ -84,6 +85,35 @@ npm run dev
 
 Open `http://localhost:5173/` — you should **not** see the “Supabase preview mode” banner if `.env` is correct.
 
+### Never open the site as `file://` (double‑clicking `index.html`)
+
+If you open `D:\...\index.html` **from Explorer** (URL starts with `file:///`), the browser uses a **`null` origin**. That causes:
+
+- **CORS / module errors** for `assets/*.js` and `*.css` (blocked loads, `net::ERR_FAILED`).
+- **Broken Supabase auth** (session / `Authorization` not sent reliably), so Edge Functions like **`teller-nonce` return 401** and you still see generic “non-2xx” messages.
+
+**Use HTTP instead:**
+
+| Goal | Command | Then open |
+|------|---------|-----------|
+| Local development | `cd bank-portal` → `npm run dev` | `http://localhost:5173/` |
+| Test the **built** site (repo root `index.html` + `assets/`) | `cd bank-portal` → `npm run build` → `npm run preview` | `http://localhost:4173/` (default) |
+
+Do **not** rely on double‑clicking `index.html` for this app.
+
+**If you open the repo-root `index.html` / `assets/` (or GitHub Pages) and see “Supabase isn’t connected yet”:**  
+`VITE_*` values are **baked in at build time**. After creating or changing `bank-portal/.env`, run `npm run build` in `bank-portal` so root `index.html` and `assets/` pick up the keys. For **GitHub Pages**, the workflow must have `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` as **Actions secrets** — a local `.env` does not affect CI until you add them there.
+
+### “Teller nonce” / Edge Function non-2xx
+
+The app calls **`teller-nonce`** (and other functions) on your Supabase project. If something fails, the UI shows the **server message** (not only “non-2xx”).
+
+| Typical message | What to do |
+|-----------------|------------|
+| **Unauthorized** (often **401** in DevTools) | Use **`http://localhost`** (dev or preview), not **`file://`**. Then sign in again so the invoke includes a valid JWT. |
+| **relation "teller_nonces" does not exist** (or insert error) | Run **`supabase/migrations/`** on this project (SQL Editor or `supabase db push`). |
+| **404** / function missing | **Deploy** Edge Functions to this project — at least `teller-nonce`, `teller-enrollment-complete`, and `teller-data` (see commands above). |
+
 ---
 
 ## What you do **not** need to invent
@@ -100,7 +130,7 @@ Open `http://localhost:5173/` — you should **not** see the “Supabase preview
 - [ ] Copy **URL** + **anon** key into `bank-portal/.env` and GitHub Actions secrets.
 - [ ] Set **Auth redirect URLs** for localhost + your GitHub Pages URL.
 - [ ] Apply **migrations**.
-- [ ] (Optional) Deploy **Edge Functions** + Teller secrets + `VITE_TELLER_*` for bank link.
+- [ ] Deploy **Edge Functions** (`teller-nonce` required for Connect; add Teller secrets + `VITE_TELLER_*` when testing bank link).
 - [ ] Push to `main` (or run the workflow manually) so **GitHub Pages** builds with secrets.
 
 That’s everything only **you** can do; the rest is already in this repository.

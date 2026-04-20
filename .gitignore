@@ -4,6 +4,10 @@ _site/
 supabase/.temp/
 supabase/.branches/
 
+# Generated Supabase MCP deploy payloads (local only)
+deploy-payload-*.json
+_mcp_deploy_args_line.txt
+
 .env
 .env.*
 !.env.example
