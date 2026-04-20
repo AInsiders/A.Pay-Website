@@ -326,6 +326,7 @@ function renderAuth() {
       return resolvedSupabaseUrl;
     }
   })();
+  const disabled = state.busy || !isSupabaseConfigured;
   return `
     <div class="fx-root fx-root--landing">
       <div class="fx-grid" aria-hidden="true"></div>
@@ -401,16 +402,25 @@ function renderAuth() {
             <button type="button" class="fx-auth-modal__close" id="auth-modal-close" aria-label="Close">×</button>
           </div>
           <p class="fx-auth-modal__lede">Secure sign-in. Your forecast and bank link sync to your profile.</p>
+          ${
+            !isSupabaseConfigured
+              ? `<div class="banner" style="margin:10px 0 12px">
+                  <strong>Supabase isn’t connected yet.</strong><br />
+                  Add <code>bank-portal/.env</code> (local) or GitHub Actions secrets (deploy) for
+                  <strong>VITE_SUPABASE_URL</strong> and <strong>VITE_SUPABASE_ANON_KEY</strong>.
+                </div>`
+              : ""
+          }
           <form id="form-signin" class="fx-auth-modal__form list">
             <label class="field">Email<input name="email" type="email" autocomplete="email" required placeholder="you@email.com" /></label>
             <label class="field">Password<input name="password" type="password" autocomplete="current-password" required placeholder="••••••••" /></label>
             <div class="row row--stretch">
-              <button type="submit" class="fx-btn-block" ${state.busy ? "disabled" : ""}>Enter A.Pay</button>
-              <button type="button" class="secondary fx-btn-block" id="btn-signup" ${state.busy ? "disabled" : ""}>Create account</button>
+              <button type="submit" class="fx-btn-block" ${disabled ? "disabled" : ""}>Enter A.Pay</button>
+              <button type="button" class="secondary fx-btn-block" id="btn-signup" ${disabled ? "disabled" : ""}>Create account</button>
             </div>
             <div class="row row--stretch">
-              <button type="button" class="secondary fx-btn-block" id="btn-magiclink" ${state.busy ? "disabled" : ""}>Email me a magic link</button>
-              <button type="button" class="secondary fx-btn-block" id="btn-forgot" ${state.busy ? "disabled" : ""}>Forgot password</button>
+              <button type="button" class="secondary fx-btn-block" id="btn-magiclink" ${disabled ? "disabled" : ""}>Email me a magic link</button>
+              <button type="button" class="secondary fx-btn-block" id="btn-forgot" ${disabled ? "disabled" : ""}>Forgot password</button>
             </div>
             <p class="muted" style="margin:6px 0 0">
               Supabase: <strong>${escapeHtml(isSupabaseConfigured ? supabaseHost : "Not configured (preview mode)")}</strong>
@@ -783,6 +793,15 @@ function wireAuth() {
   const recoveryForm = document.querySelector<HTMLFormElement>("#form-recovery");
 
   const redirectTo = `${new URL(import.meta.env.BASE_URL, window.location.origin)}`;
+  if (!isSupabaseConfigured) {
+    // Keep the modal usable for instructions, but prevent confusing network errors.
+    form?.addEventListener("submit", (e) => e.preventDefault());
+    signup?.addEventListener("click", () => {});
+    magic?.addEventListener("click", () => {});
+    forgot?.addEventListener("click", () => {});
+    recoveryForm?.addEventListener("submit", (e) => e.preventDefault());
+    return;
+  }
   form?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(form);
