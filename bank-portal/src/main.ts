@@ -35,6 +35,11 @@ function formatAuthError(prefix: string, err: unknown): string {
 }
 
 /** Supabase `functions.invoke` hides Edge Function JSON in `FunctionsHttpError.context` — unpack it. */
+/** `teller-data` returns 400 when the user has not completed Teller Connect yet — not a sync failure. */
+function isNoBankEnrollmentMessage(msg: string): boolean {
+  return /No bank connection\. Run Teller Connect first\./i.test(msg.trim());
+}
+
 async function edgeFunctionMessage(err: unknown): Promise<string> {
   if (err && typeof err === "object" && "context" in err) {
     const ctx = (err as { context?: Response }).context;
@@ -207,7 +212,19 @@ async function refreshBankData() {
       body: { action: "accounts" },
       headers,
     });
-    if (error) throw new Error(await edgeFunctionMessage(error));
+    if (error) {
+      const msg = await edgeFunctionMessage(error);
+      if (isNoBankEnrollmentMessage(msg)) {
+        state.accounts = [];
+        state.transactions = [];
+        state.selectedAccountId = null;
+        state.busy = false;
+        state.error = null;
+        render();
+        return;
+      }
+      throw new Error(msg);
+    }
     const payload = data as { accounts?: unknown[]; error?: string };
     if (payload?.error) throw new Error(payload.error);
     state.accounts = payload.accounts ?? [];
