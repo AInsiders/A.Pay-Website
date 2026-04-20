@@ -38,17 +38,39 @@ function formatAuthError(prefix: string, err: unknown): string {
 async function edgeFunctionMessage(err: unknown): Promise<string> {
   if (err && typeof err === "object" && "context" in err) {
     const ctx = (err as { context?: Response }).context;
-    if (ctx && typeof ctx.json === "function") {
+    if (ctx && typeof ctx.clone === "function") {
+      const status = ctx.status;
       try {
-        const body = (await ctx.clone().json()) as { error?: string };
-        if (typeof body?.error === "string" && body.error.length) return body.error;
+        const text = (await ctx.clone().text()).trim();
+        if (text) {
+          try {
+            const body = JSON.parse(text) as Record<string, unknown>;
+            const piece =
+              (typeof body.error === "string" && body.error) ||
+              (typeof body.message === "string" && body.message) ||
+              (typeof body.msg === "string" && body.msg);
+            if (piece) return status ? `${piece} (HTTP ${status})` : String(piece);
+          } catch {
+            return status ? `${text.slice(0, 400)} (HTTP ${status})` : text.slice(0, 400);
+          }
+        }
       } catch {
-        /* ignore */
+        /* fall through */
       }
+      if (status) return `HTTP ${status}`;
     }
   }
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/** Ensures Edge Functions receive a JWT (some browsers/builds omit the default header). */
+async function bearerAuthHeaders(): Promise<{ Authorization: string }> {
+  const { data, error } = await supabase.auth.getSession();
+  if (error) throw error;
+  const t = data.session?.access_token?.trim();
+  if (!t) throw new Error("No active session. Sign out and sign in again.");
+  return { Authorization: `Bearer ${t}` };
 }
 
 const THEME_PRESETS: { id: string; label: string; hex: string }[] = [
@@ -180,8 +202,10 @@ async function refreshBankData() {
   state.error = null;
   render();
   try {
+    const headers = await bearerAuthHeaders();
     const { data, error } = await supabase.functions.invoke("teller-data", {
       body: { action: "accounts" },
+      headers,
     });
     if (error) throw new Error(await edgeFunctionMessage(error));
     const payload = data as { accounts?: unknown[]; error?: string };
@@ -213,8 +237,10 @@ async function loadTransactions() {
   state.error = null;
   render();
   try {
+    const headers = await bearerAuthHeaders();
     const { data, error } = await supabase.functions.invoke("teller-data", {
       body: { action: "transactions", accountId: state.selectedAccountId },
+      headers,
     });
     if (error) throw new Error(await edgeFunctionMessage(error));
     const payload = data as { transactions?: unknown[]; error?: string };
@@ -231,7 +257,11 @@ async function loadTransactions() {
 
 async function fetchNonce(): Promise<string> {
   try {
-    const { data, error } = await supabase.functions.invoke("teller-nonce", { body: {} });
+    const headers = await bearerAuthHeaders();
+    const { data, error } = await supabase.functions.invoke("teller-nonce", {
+      body: {},
+      headers,
+    });
     if (error) throw new Error(await edgeFunctionMessage(error));
     const n = (data as { nonce?: string })?.nonce;
     if (!n) throw new Error("No nonce returned");
@@ -286,8 +316,10 @@ async function startTellerConnect() {
       state.busy = true;
       state.error = null;
       render();
+      const headers = await bearerAuthHeaders();
       const { error } = await supabase.functions.invoke("teller-enrollment-complete", {
         body: { nonce, environment: tellerEnvironment(), payload: enrollment },
+        headers,
       });
       state.busy = false;
       if (error) {
