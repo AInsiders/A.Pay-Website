@@ -47,14 +47,16 @@ Either:
 
 ### 4. Edge Functions + Teller (only when you want bank linking)
 
-Deploy from repo root (after `supabase link`):
+Deploy from repo root (after `supabase link`). Use **`--no-verify-jwt`** on these Teller handlers so the hosted gateway does not reject **ES256** session JWTs (your functions still call `getUser()` with the caller’s token):
 
 ```bash
-supabase functions deploy teller-nonce
-supabase functions deploy teller-enrollment-complete
-supabase functions deploy teller-data
+supabase functions deploy teller-nonce --no-verify-jwt
+supabase functions deploy teller-enrollment-complete --no-verify-jwt
+supabase functions deploy teller-data --no-verify-jwt
 supabase functions deploy teller-webhook --no-verify-jwt
 ```
+
+`supabase/config.toml` matches this for local `supabase functions serve`; redeploy after changing function code.
 
 In Supabase → **Edge Functions** → **Secrets**, set at least:
 
@@ -85,6 +87,8 @@ npm run dev
 
 Open `http://localhost:5173/` — you should **not** see the “Supabase preview mode” banner if `.env` is correct.
 
+`bank-portal/vite.config.ts` sets **`root`** and **`envDir`** to `bank-portal/`, so **`bank-portal/.env`** is always loaded even if you run commands from the repo root.
+
 ### Never open the site as `file://` (double‑clicking `index.html`)
 
 If you open `D:\...\index.html` **from Explorer** (URL starts with `file:///`), the browser uses a **`null` origin**. That causes:
@@ -113,6 +117,11 @@ The app calls **`teller-nonce`** (and other functions) on your Supabase project.
 | **Unauthorized** (often **401** in DevTools) | Use **`http://localhost`** (dev or preview), not **`file://`**. Then sign in again so the invoke includes a valid JWT. |
 | **relation "teller_nonces" does not exist** (or insert error) | Run **`supabase/migrations/`** on this project (SQL Editor or `supabase db push`). |
 | **404** / function missing | **Deploy** Edge Functions to this project — at least `teller-nonce`, `teller-enrollment-complete`, and `teller-data` (see commands above). |
+| **Unsupported JWT algorithm ES256** (HTTP **401** on `functions/v1/…`) | Redeploy with **`--no-verify-jwt`** (see deploy block above) or turn off JWT verification for those functions in the Supabase dashboard. |
+
+### Teller Connect (finish bank link in the overlay)
+
+**Connect my bank** opens Teller in a **full-page iframe** (`teller.io`). You complete institution search and credentials **inside that overlay**; browser automation from the host page cannot drive those fields (cross-origin). After success, use **Refresh data** if accounts do not appear immediately.
 
 ---
 
@@ -130,7 +139,7 @@ The app calls **`teller-nonce`** (and other functions) on your Supabase project.
 - [ ] Copy **URL** + **anon** key into `bank-portal/.env` and GitHub Actions secrets.
 - [ ] Set **Auth redirect URLs** for localhost + your GitHub Pages URL.
 - [ ] Apply **migrations**.
-- [ ] Deploy **Edge Functions** (`teller-nonce` required for Connect; add Teller secrets + `VITE_TELLER_*` when testing bank link).
+- [ ] Deploy **Edge Functions** with **`--no-verify-jwt`** on Teller functions (see commands above); add Teller secrets + `VITE_TELLER_*` when testing bank link.
 - [ ] Push to `main` (or run the workflow manually) so **GitHub Pages** builds with secrets.
 
 That’s everything only **you** can do; the rest is already in this repository.
