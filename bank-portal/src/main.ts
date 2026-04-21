@@ -1093,7 +1093,11 @@ function wireAuth() {
     state.error = null;
     state.authModalOpen = true;
     render();
-    const { data, error } = await supabase.auth.signUp({ email, password });
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { emailRedirectTo: authEmailRedirectUrl() },
+    });
     state.busy = false;
     if (error) {
       state.error = error.message;
