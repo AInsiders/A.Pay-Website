@@ -12,6 +12,8 @@ type Profile = {
   theme_mode?: "dark" | "light" | null;
 };
 
+type RouteId = "home" | "about" | "contact" | "privacy" | "terms" | "dashboard";
+
 function supabaseHostHint(): string {
   try {
     return new URL(resolvedSupabaseUrl).host;
@@ -181,6 +183,7 @@ const state: {
   error: string | null;
   info: string | null;
   busy: boolean;
+  route: RouteId;
   /** Guest landing: sign-in modal visibility */
   authModalOpen: boolean;
   /** When user returned from a password recovery email link. */
@@ -194,6 +197,7 @@ const state: {
   error: null,
   info: null,
   busy: false,
+  route: "home",
   authModalOpen: false,
   recoveryMode: false,
 };
@@ -204,6 +208,28 @@ const app = document.querySelector<HTMLDivElement>("#app")!;
 let landingParallaxTeardown: (() => void) | null = null;
 
 const DEFAULT_ACCENT = "#5ee7ff";
+
+function normalizeRouteId(v: string): RouteId {
+  const raw = v.trim().toLowerCase();
+  if (raw === "" || raw === "home") return "home";
+  if (raw === "about" || raw === "about-us" || raw === "aboutus") return "about";
+  if (raw === "contact" || raw === "contact-us" || raw === "contactus") return "contact";
+  if (raw === "privacy" || raw === "privacy-policy") return "privacy";
+  if (raw === "terms" || raw === "terms-and-conditions" || raw === "terms-conditions") return "terms";
+  if (raw === "dashboard") return "dashboard";
+  return "home";
+}
+
+function readRouteFromHash(): RouteId {
+  const h = window.location.hash.replace(/^#\/?/, "");
+  return normalizeRouteId(h);
+}
+
+function setRoute(next: RouteId) {
+  const target = next === "home" ? "#/" : `#/${next}`;
+  if (window.location.hash === target) return;
+  window.location.hash = target;
+}
 
 function applyMode(mode: Profile["theme_mode"]) {
   const m = mode === "light" ? "light" : "dark";
@@ -493,6 +519,190 @@ function renderBoot() {
 const LANDING_HERO_IMG =
   "https://images.unsplash.com/photo-1530651788726-238dfa2d8d5c?auto=format&fit=crop&w=1920&q=85";
 
+function navLink(route: RouteId, label: string, current: RouteId) {
+  const href = route === "home" ? "#/" : `#/${route}`;
+  const active = route === current ? " is-active" : "";
+  return `<a class="fx-nav__link${active}" href="${href}" data-nav="${route}">${escapeHtml(label)}</a>`;
+}
+
+function renderPublicPage(route: RouteId) {
+  switch (route) {
+    case "about":
+      return `
+        <main class="fx-doc shell-narrow" role="main">
+          <p class="fx-doc__eyebrow">About</p>
+          <h1 class="fx-doc__title">A.Pay is a money plan that thinks ahead.</h1>
+          <p class="fx-doc__lede">
+            Most budgeting apps show charts after the fact. A.Pay forecasts forward—mapping paychecks to upcoming bills,
+            prioritizing essentials, and keeping a clear “safe to spend” number front and center.
+          </p>
+          <div class="fx-doc__grid">
+            <section class="fx-doc__card">
+              <h2>Essentials-first planning</h2>
+              <p class="muted">Upcoming bills and obligations get handled before “extra” money is counted as free.</p>
+            </section>
+            <section class="fx-doc__card">
+              <h2>Paycheck-by-paycheck forecast</h2>
+              <p class="muted">See what’s due next and how future paydays cover future bills—before the stress hits.</p>
+            </section>
+            <section class="fx-doc__card">
+              <h2>Low effort, high clarity</h2>
+              <p class="muted">Connect accounts with Teller and let real activity keep the forecast honest over time.</p>
+            </section>
+          </div>
+          <div class="fx-doc__cta">
+            <button type="button" class="fx-btn-hero js-open-auth">Sign in</button>
+            <a class="fx-btn-hero-secondary" href="#/contact">Contact us</a>
+          </div>
+        </main>
+      `;
+    case "contact":
+      return `
+        <main class="fx-doc shell-narrow" role="main">
+          <p class="fx-doc__eyebrow">Contact</p>
+          <h1 class="fx-doc__title">Talk to the team.</h1>
+          <p class="fx-doc__lede">Questions, bugs, partnerships, security—send a note and we’ll respond.</p>
+
+          <div class="fx-doc__card">
+            <form id="form-contact" class="list">
+              <label class="field">
+                Topic
+                <select name="topic" required>
+                  <option value="support">Support</option>
+                  <option value="billing">Billing</option>
+                  <option value="privacy">Privacy</option>
+                  <option value="security">Security</option>
+                  <option value="partnerships">Partnerships</option>
+                </select>
+              </label>
+              <label class="field">Email<input name="email" type="email" autocomplete="email" required placeholder="you@email.com" /></label>
+              <label class="field">Message<textarea name="message" rows="5" required placeholder="How can we help?"></textarea></label>
+              <div class="row row--stretch">
+                <button type="submit" class="fx-btn-block">Send message</button>
+                <button type="button" class="secondary fx-btn-block js-open-auth">Sign in</button>
+              </div>
+              <p class="muted" style="margin:8px 0 0">For now this form is a UI placeholder. Hook it to email or a ticket system when you’re ready.</p>
+            </form>
+          </div>
+        </main>
+      `;
+    case "privacy":
+      return `
+        <main class="fx-doc shell-narrow" role="main">
+          <p class="fx-doc__eyebrow">Legal</p>
+          <h1 class="fx-doc__title">Privacy Policy</h1>
+          <p class="fx-doc__lede">Plain English summary first. Replace with your final policy text before launch.</p>
+
+          <div class="fx-doc__card fx-doc__prose">
+            <h2>Summary</h2>
+            <ul>
+              <li>We collect the minimum needed to run your account and produce forecasts.</li>
+              <li>Connected bank data is used to keep your plan accurate and current.</li>
+              <li>We do not sell personal data.</li>
+            </ul>
+            <h2>Data we collect</h2>
+            <p>Account/profile info (email, display name), connected financial data (accounts, balances, transactions), and usage events for reliability.</p>
+            <h2>How we use data</h2>
+            <p>To forecast upcoming bills, allocate paychecks, and show a safe-to-spend number. To improve reliability and prevent abuse.</p>
+            <h2>Your control</h2>
+            <p>You can disconnect accounts and request deletion. Use Contact for privacy requests.</p>
+          </div>
+        </main>
+      `;
+    case "terms":
+      return `
+        <main class="fx-doc shell-narrow" role="main">
+          <p class="fx-doc__eyebrow">Legal</p>
+          <h1 class="fx-doc__title">Terms &amp; Conditions</h1>
+          <p class="fx-doc__lede">Replace with your final terms before launch.</p>
+
+          <div class="fx-doc__card fx-doc__prose">
+            <h2>Service</h2>
+            <p>A.Pay provides planning and forecasting tools. It does not provide professional financial advice.</p>
+            <h2>Accounts</h2>
+            <p>You’re responsible for maintaining the security of your login and for any activity under your account.</p>
+            <h2>Limitations</h2>
+            <p>Forecasts are estimates based on the data available. Always verify important payments and balances.</p>
+          </div>
+        </main>
+      `;
+    case "home":
+    default:
+      return `
+        <div class="fx-hero-parallax-wrap" id="hero-parallax-scope" aria-label="A.Pay home">
+          <section class="fx-hero-pro fx-hero-pro--fullscreen" aria-labelledby="landing-hero-title">
+            <div class="fx-hero-pro__media">
+              <div class="fx-hero-pro__parallax-inner fx-parallax-bg">
+                <img
+                  class="fx-hero-pro__img"
+                  src="${LANDING_HERO_IMG}"
+                  width="1920"
+                  height="1080"
+                  alt="US hundred-dollar bills—liquid cash, financial freedom energy"
+                  decoding="async"
+                  fetchpriority="high"
+                />
+              </div>
+            </div>
+            <div class="fx-hero-pro__overlay"></div>
+
+            <div class="fx-hero-pro__body">
+              <div class="fx-hero-pro__content shell-narrow fx-parallax-hero-copy">
+                <p class="fx-hero-pro__eyebrow">Bill dread off · liquidity on</p>
+                <h1 id="landing-hero-title" class="fx-hero-pro__title">
+                  Built for the vibe of <span class="fx-hero-pro__accent">all cash, no panic</span>
+                </h1>
+                <p class="fx-hero-pro__lede">
+                  See what’s already handled automatically, then treat the rest like money in your pocket—forecast paydays,
+                  link your bank with Teller, and spend knowing exactly what’s still truly yours.
+                </p>
+                <div class="fx-hero-pro__actions">
+                  <button type="button" class="fx-btn-hero" id="btn-hero-cta">Start stacking clarity</button>
+                  <button type="button" class="fx-btn-hero-secondary js-open-auth">I already have an account</button>
+                </div>
+                <ul class="fx-hero-pro__trust" aria-label="Highlights">
+                  <li>Liquid cash, spelled out</li>
+                  <li>Real balances via Teller</li>
+                  <li>Spend loud, not blind</li>
+                </ul>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <section class="fx-value-section shell-narrow" aria-labelledby="value-heading">
+          <h2 id="value-heading" class="fx-value-section__title">Why cash-conscious households use A.Pay</h2>
+          <p class="fx-value-section__subtitle">
+            Most apps leave you staring at history. A.Pay shows what stays liquid after life auto-pays itself—so you move through paydays with swagger, not spreadsheet shame.
+          </p>
+          <div class="fx-value-grid">
+            <article class="fx-value-card">
+              <span class="fx-value-card__icon" aria-hidden="true">01</span>
+              <h3 class="fx-value-card__h">Forecast across paydays</h3>
+              <p class="fx-value-card__p">
+                Map income across upcoming paydays—liquidity first, not just today’s balance—so shortfalls surface before they sting.
+              </p>
+            </article>
+            <article class="fx-value-card">
+              <span class="fx-value-card__icon" aria-hidden="true">02</span>
+              <h3 class="fx-value-card__h">Know what’s safe to spend</h3>
+              <p class="fx-value-card__p">
+                See what’s already earmarked for life’s non-negotiables, then spend what’s left without the guilt—or the overdraft surprise.
+              </p>
+            </article>
+            <article class="fx-value-card">
+              <span class="fx-value-card__icon" aria-hidden="true">03</span>
+              <h3 class="fx-value-card__h">Real bank data, one glass pane</h3>
+              <p class="fx-value-card__p">
+                Connect accounts with Teller and watch deposits and debits roll in. Your forecast stays honest because your numbers stay current.
+              </p>
+            </article>
+          </div>
+        </section>
+      `;
+  }
+}
+
 function renderAuth() {
   const supabaseHost = (() => {
     try {
@@ -502,6 +712,16 @@ function renderAuth() {
     }
   })();
   const disabled = state.busy || !isSupabaseConfigured;
+  const route = state.route;
+  const nav = `
+    <nav class="fx-nav" aria-label="Primary">
+      ${navLink("home", "Home", route)}
+      ${navLink("about", "About", route)}
+      ${navLink("contact", "Contact", route)}
+      ${navLink("privacy", "Privacy", route)}
+      ${navLink("terms", "Terms", route)}
+    </nav>
+  `;
   return `
     <div class="fx-root fx-root--landing">
       <div class="fx-grid" aria-hidden="true"></div>
@@ -517,50 +737,12 @@ function renderAuth() {
               <span class="fx-brand__tag">Cash-first clarity</span>
             </div>
           </div>
+          ${nav}
           <button type="button" class="fx-landing-header__link" id="btn-open-auth">Sign in</button>
         </div>
       </header>
 
-      <div class="fx-hero-parallax-wrap" id="hero-parallax-scope" aria-label="A.Pay home">
-        <section class="fx-hero-pro fx-hero-pro--fullscreen" aria-labelledby="landing-hero-title">
-          <div class="fx-hero-pro__media">
-            <div class="fx-hero-pro__parallax-inner fx-parallax-bg">
-              <img
-                class="fx-hero-pro__img"
-                src="${LANDING_HERO_IMG}"
-                width="1920"
-                height="1080"
-                alt="US hundred-dollar bills—liquid cash, financial freedom energy"
-                decoding="async"
-                fetchpriority="high"
-              />
-            </div>
-          </div>
-          <div class="fx-hero-pro__overlay"></div>
-
-          <div class="fx-hero-pro__body">
-            <div class="fx-hero-pro__content shell-narrow fx-parallax-hero-copy">
-              <p class="fx-hero-pro__eyebrow">Bill dread off · liquidity on</p>
-              <h1 id="landing-hero-title" class="fx-hero-pro__title">
-                Built for the vibe of <span class="fx-hero-pro__accent">all cash, no panic</span>
-              </h1>
-              <p class="fx-hero-pro__lede">
-                See what’s already handled automatically, then treat the rest like money in your pocket—forecast paydays,
-                link your bank with Teller, and spend knowing exactly what’s still truly yours.
-              </p>
-              <div class="fx-hero-pro__actions">
-                <button type="button" class="fx-btn-hero" id="btn-hero-cta">Start stacking clarity</button>
-                <button type="button" class="fx-btn-hero-secondary js-open-auth">I already have an account</button>
-              </div>
-              <ul class="fx-hero-pro__trust" aria-label="Highlights">
-                <li>Liquid cash, spelled out</li>
-                <li>Real balances via Teller</li>
-                <li>Spend loud, not blind</li>
-              </ul>
-            </div>
-          </div>
-        </section>
-      </div>
+      ${renderPublicPage(route)}
 
       <div
         class="fx-auth-modal${state.authModalOpen ? " fx-auth-modal--open" : ""}"
@@ -627,38 +809,13 @@ function renderAuth() {
       <footer class="fx-landing-footer" role="contentinfo">
         <div class="fx-landing-footer__inner shell-narrow">
           <p class="fx-landing-footer__copy">© ${new Date().getFullYear()} A.Insiders Network. All rights reserved.</p>
+          <div class="fx-landing-footer__links" aria-label="Legal">
+            <a href="#/privacy">Privacy</a>
+            <a href="#/terms">Terms</a>
+          </div>
         </div>
       </footer>
 
-      <section class="fx-value-section shell-narrow" aria-labelledby="value-heading">
-        <h2 id="value-heading" class="fx-value-section__title">Why cash-conscious households use A.Pay</h2>
-        <p class="fx-value-section__subtitle">
-          Most apps leave you staring at history. A.Pay shows what stays liquid after life auto-pays itself—so you move through paydays with swagger, not spreadsheet shame.
-        </p>
-        <div class="fx-value-grid">
-          <article class="fx-value-card">
-            <span class="fx-value-card__icon" aria-hidden="true">01</span>
-            <h3 class="fx-value-card__h">Forecast across paydays</h3>
-            <p class="fx-value-card__p">
-              Map income across upcoming paydays—liquidity first, not just today’s balance—so shortfalls surface before they sting.
-            </p>
-          </article>
-          <article class="fx-value-card">
-            <span class="fx-value-card__icon" aria-hidden="true">02</span>
-            <h3 class="fx-value-card__h">Know what’s safe to spend</h3>
-            <p class="fx-value-card__p">
-              See what’s already earmarked for life’s non-negotiables, then spend what’s left without the guilt—or the overdraft surprise.
-            </p>
-          </article>
-          <article class="fx-value-card">
-            <span class="fx-value-card__icon" aria-hidden="true">03</span>
-            <h3 class="fx-value-card__h">Real bank data, one glass pane</h3>
-            <p class="fx-value-card__p">
-              Connect accounts with Teller and watch deposits and debits roll in. Your forecast stays honest because your numbers stay current.
-            </p>
-          </article>
-        </div>
-      </section>
     </div>
   `;
 }
@@ -827,6 +984,16 @@ function render() {
   landingParallaxTeardown?.();
   landingParallaxTeardown = null;
 
+  state.route = readRouteFromHash();
+
+  if (!state.session && state.route === "dashboard") {
+    state.authModalOpen = true;
+    state.route = "home";
+    if (window.location.hash !== "#/" && window.location.hash !== "") {
+      window.location.hash = "#/";
+    }
+  }
+
   if (!state.session) {
     applyFullTheme(null);
     document.body.style.overflow = state.authModalOpen ? "hidden" : "";
@@ -917,12 +1084,31 @@ function bindLandingParallax() {
 }
 
 function wireAuth() {
-  bindLandingParallax();
+  if (state.route === "home") bindLandingParallax();
 
   document.getElementById("btn-hero-cta")?.addEventListener("click", () => openAuthModal());
   document.getElementById("btn-open-auth")?.addEventListener("click", () => openAuthModal());
   document.querySelectorAll<HTMLElement>(".js-open-auth").forEach((el) => {
     el.addEventListener("click", () => openAuthModal());
+  });
+
+  // If you navigate away from Home while modal is open, keep it usable.
+  document.querySelectorAll<HTMLAnchorElement>("[data-nav]").forEach((a) => {
+    a.addEventListener("click", () => {
+      // Close modal when navigating between content pages (user intent is reading).
+      if (!state.recoveryMode) state.authModalOpen = false;
+    });
+  });
+
+  document.querySelector<HTMLFormElement>("#form-contact")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    state.info = "Message queued (wire this form to email/tickets when ready).";
+    state.error = null;
+    render();
+    setTimeout(() => {
+      state.info = null;
+      render();
+    }, 2200);
   });
 
   document.getElementById("auth-modal-backdrop")?.addEventListener("click", () => closeAuthModal());
@@ -1248,6 +1434,8 @@ async function init() {
     state.error = e instanceof Error ? e.message : String(e);
     render();
   }
+
+  window.addEventListener("hashchange", () => render());
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape" || state.session || !state.authModalOpen) return;
