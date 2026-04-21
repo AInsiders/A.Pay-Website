@@ -19,6 +19,26 @@ import {
   privacyPolicyProseHtml,
   termsOfServiceProseHtml,
 } from "./legal-pages";
+import type { PlannerSnapshot } from "./planner-engine-shared";
+import {
+  currentUserId,
+  deleteBill,
+  deleteDebt,
+  deleteGoal,
+  deleteIncomeSource,
+  deleteRecurringExpense,
+  loadPlannerSnapshot as loadNormalizedSnapshot,
+  recomputeAndPersistPlan,
+  saveBill,
+  saveDebt,
+  saveGoal,
+  saveHousingConfig,
+  saveIncomeSource,
+  savePlannerSettings,
+  saveRecurringExpense,
+  saveTransactionCategorization,
+  saveTransactionSplits,
+} from "./planner-data";
 
 /** Edge → Teller can be slow (cold start + bank API). Avoid client-side fetch aborting too early. */
 const TELLER_DATA_INVOKE_TIMEOUT_MS = 150_000;
@@ -31,9 +51,122 @@ type Profile = {
 };
 
 type RouteId = "home" | "about" | "contact" | "privacy" | "terms" | "planner" | "bills" | "accounts" | "settings";
+type WebSetupOption = {
+  title: string;
+  subtitle: string;
+  description: string;
+};
+type WebSetupGroup = {
+  title: string;
+  subtitle: string;
+  description: string;
+  options: WebSetupOption[];
+};
 
 const APP_ONLY_ROUTES = new Set<RouteId>(["planner", "bills", "accounts", "settings"]);
 const APP_PRIMARY_ROUTES = new Set<RouteId>(["home", "planner", "bills", "accounts", "settings"]);
+const PLANNER_SNAPSHOT_SELECT =
+  "id, user_id, plan, snapshot, created_at, updated_at, source_platform, source_app_version, source_updated_at, planner_schema_version, planner_engine_version";
+
+const CORE_SETUP_OPTIONS: WebSetupOption[] = [
+  {
+    title: "Accounts",
+    subtitle: "Cash, bank, wallet, and balances",
+    description: "Add the balances that tell the planner what money is actually available right now.",
+  },
+  {
+    title: "Income",
+    subtitle: "Pay sources, schedules, and variability",
+    description: "Add each paycheck source so future cash and timing can be forecast correctly.",
+  },
+  {
+    title: "Bills",
+    subtitle: "Hard dues, subscriptions, and due rules",
+    description: "Add real bill amounts and due timing so the planner can protect what matters first.",
+  },
+  {
+    title: "Expenses",
+    subtitle: "Essential and recurring living costs",
+    description: "Add recurring spending like groceries, gas, and other essentials.",
+  },
+  {
+    title: "Debts",
+    subtitle: "Balances, due dates, and payoff behavior",
+    description: "Add debt balances and minimums so debt pressure and payoff guidance stay accurate.",
+  },
+  {
+    title: "Housing",
+    subtitle: "Rent, arrears, and housing setup",
+    description: "Set rent or mortgage details so safe-to-spend stays realistic.",
+  },
+];
+
+const WEB_SETTINGS_GROUPS: WebSetupGroup[] = [
+  {
+    title: "Setup",
+    subtitle: "Accounts, income, bills, expenses, debts, and housing",
+    description: "Set up the money inputs the planner needs before it can give reliable answers.",
+    options: [
+      ...CORE_SETUP_OPTIONS,
+      {
+        title: "Bank linking",
+        subtitle: "Teller Connect",
+        description: "Connect your bank here on the Accounts page so balances and transactions can sync in.",
+      },
+    ],
+  },
+  {
+    title: "Planning",
+    subtitle: "Goals, paycheck rules, and planning preferences",
+    description: "Shape how extra money, paycheck carve-outs, and planning preferences behave.",
+    options: [
+      {
+        title: "Goals",
+        subtitle: "Saved targets that use truly free cash",
+        description: "Track savings progress without overriding protected bills and essentials.",
+      },
+      {
+        title: "Paycheck Rules",
+        subtitle: "Deductions, savings, and paycheck carve-outs",
+        description: "Reduce usable pay before it reaches planning cash.",
+      },
+      {
+        title: "Planning Preferences",
+        subtitle: "Buffers, payoff, feasibility, and ordering rules",
+        description: "Adjust safety floors, reserve behavior, and payoff style.",
+      },
+    ],
+  },
+  {
+    title: "App",
+    subtitle: "Notifications and organization",
+    description: "Control reminders and the labels that keep your data easier to read.",
+    options: [
+      {
+        title: "Organization",
+        subtitle: "Categories and custom labels",
+        description: "Keep data grouped and named in ways that match real life.",
+      },
+      {
+        title: "Notifications",
+        subtitle: "Payday and planning reminders",
+        description: "Reminder settings live here once web editing expands.",
+      },
+    ],
+  },
+  {
+    title: "Data",
+    subtitle: "Backup, import, export, and reset",
+    description: "Protect your data and restore it when you move devices or need a clean reset.",
+    options: [
+      {
+        title: "Backup & Reset",
+        subtitle: "Import, export, and reset app data",
+        description: "Use the same live planner model when backing up or resetting.",
+      },
+    ],
+  },
+];
 
 function supabaseHostHint(): string {
   try {
@@ -199,6 +332,13 @@ const state: {
   session: Awaited<ReturnType<typeof supabase.auth.getSession>>["data"]["session"];
   profile: Profile | null;
   plannerSnapshot: unknown | null;
+  plannerSnapshotDraft: string;
+  plannerSnapshotDirty: boolean;
+  plannerSnapshotSaveBusy: boolean;
+  plannerSnapshotSaveError: string | null;
+  normalizedSnapshot: PlannerSnapshot | null;
+  normalizedSnapshotBusy: boolean;
+  normalizedSnapshotError: string | null;
   accounts: unknown[];
   transactions: unknown[];
   selectedAccountId: string | null;
@@ -214,10 +354,19 @@ const state: {
   authModalOpen: boolean;
   /** When user returned from a password recovery email link. */
   recoveryMode: boolean;
+  /** Currently open form editor on Settings (bill/income/etc) or null. */
+  settingsEditor: SettingsEditorState | null;
 } = {
   session: null,
   profile: null,
   plannerSnapshot: null,
+  plannerSnapshotDraft: "",
+  plannerSnapshotDirty: false,
+  plannerSnapshotSaveBusy: false,
+  plannerSnapshotSaveError: null,
+  normalizedSnapshot: null,
+  normalizedSnapshotBusy: false,
+  normalizedSnapshotError: null,
   accounts: [],
   transactions: [],
   selectedAccountId: null,
@@ -229,7 +378,17 @@ const state: {
   route: "home",
   authModalOpen: false,
   recoveryMode: false,
+  settingsEditor: null,
 };
+
+type SettingsEditorState =
+  | { kind: "bill"; id?: string }
+  | { kind: "income"; id?: string }
+  | { kind: "debt"; id?: string }
+  | { kind: "expense"; id?: string }
+  | { kind: "goal"; id?: string }
+  | { kind: "housing" }
+  | { kind: "planner-settings" };
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
@@ -291,6 +450,178 @@ function money(n: unknown): string {
   const abs = Math.abs(num);
   const sign = num < 0 ? "-" : "";
   return `${sign}$${abs.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function todayIsoDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function createDefaultPlannerSnapshot(): Record<string, unknown> {
+  return {
+    today: todayIsoDate(),
+    accounts: [],
+    incomeSources: [],
+    paychecks: [],
+    paycheckActions: [],
+    billPayments: [],
+    debtTransactions: [],
+    expenseSpends: [],
+    housingPayments: [],
+    cashAdjustments: [],
+    bills: [],
+    debts: [],
+    expenses: [],
+    housingConfig: null,
+    housingBuckets: [],
+    goals: [],
+    deductionRules: [],
+    categories: [],
+    labels: [],
+    demoModeState: {
+      id: "demo_state",
+      mode: "ONBOARDING",
+      selectedDemoId: null,
+      demoImportedAt: null,
+      lastModeChangedAt: new Date().toISOString(),
+    },
+    notificationSettings: {
+      id: "notification_settings",
+      paydayNotificationsEnabled: false,
+      recalculateRemindersEnabled: false,
+      paydayLeadMinutes: 60,
+      recalculateReminderHour: 18,
+      recalculateReminderMinute: 0,
+      funMessageCursor: 0,
+      updatedAt: new Date().toISOString(),
+    },
+    exportMetadata: {
+      id: "export_metadata",
+      schemaVersion: 1,
+      appVersion: "bank-portal",
+      lastExportAt: null,
+      lastImportAt: null,
+      lastFileName: null,
+    },
+    settings: {
+      targetBuffer: 0,
+      planStartDate: null,
+      planEndDate: null,
+      planHorizonDays: 36500,
+      currency: "USD",
+      timezone: "UTC",
+      safetyFloorCash: 0,
+      roundingMode: "NEAREST_CENT",
+      optimizationGoal: "BALANCED",
+      sameDayIncomeBeforeSameDayBills: true,
+      reserveNearFutureWindowDays: 21,
+      allowNegativeCash: false,
+      priorityOrder: [
+        "ESSENTIALS",
+        "OVERDUE_ITEMS",
+        "HARD_BILLS_AND_DEBTS",
+        "CURRENT_RENT",
+        "RENT_ARREARS",
+        "BORROW_REPAYMENTS",
+        "NEAR_FUTURE_RESERVES",
+        "EXTRA_DEBT_PAYOFF",
+        "FUTURE_RENT_PREPAY",
+        "SAVINGS",
+      ],
+      planningStyle: "BALANCED",
+      payoffMode: "SNOWBALL",
+      housingPaymentMode: "MINIMUM_CURRENT",
+      housingPayoffTargetMode: "REGULAR_DEBTS_ONLY",
+      plannerMode: null,
+      selectedScenarioMode: "FIXED",
+      readOnlyCalculatedFields: [
+        "current_paycheck_allocation",
+        "next_paycheck_amount_needed",
+        "survival_amount",
+        "ideal_amount",
+        "amount_left",
+        "debt_balances_left",
+        "arrears_left",
+        "projected_debt_free_date",
+        "warnings",
+        "safe_extra_payoff",
+        "safe_to_spend_now",
+        "protected_amount",
+        "safe_reborrow_amount",
+        "goal_progress",
+        "goal_timeline",
+        "out_of_debt_state",
+        "catch_up_time_estimates",
+        "plan_mode_results",
+      ],
+      notificationPermissionAsked: false,
+      lastRecalculatedAt: null,
+      debtFreeLatched: false,
+      debtFreeScreenDismissed: false,
+    },
+    tellerEnrollments: [],
+  };
+}
+
+function plannerSnapshotPretty(value: unknown): string {
+  return JSON.stringify(value ?? createDefaultPlannerSnapshot(), null, 2);
+}
+
+function coercePlannerSnapshotShape(value: unknown): Record<string, unknown> {
+  const base = createDefaultPlannerSnapshot();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return base;
+  const raw = value as Record<string, unknown>;
+  return {
+    ...base,
+    ...raw,
+    today: typeof raw.today === "string" ? raw.today : base.today,
+    accounts: Array.isArray(raw.accounts) ? raw.accounts : base.accounts,
+    incomeSources: Array.isArray(raw.incomeSources) ? raw.incomeSources : base.incomeSources,
+    paychecks: Array.isArray(raw.paychecks) ? raw.paychecks : base.paychecks,
+    paycheckActions: Array.isArray(raw.paycheckActions) ? raw.paycheckActions : base.paycheckActions,
+    billPayments: Array.isArray(raw.billPayments) ? raw.billPayments : base.billPayments,
+    debtTransactions: Array.isArray(raw.debtTransactions) ? raw.debtTransactions : base.debtTransactions,
+    expenseSpends: Array.isArray(raw.expenseSpends) ? raw.expenseSpends : base.expenseSpends,
+    housingPayments: Array.isArray(raw.housingPayments) ? raw.housingPayments : base.housingPayments,
+    cashAdjustments: Array.isArray(raw.cashAdjustments) ? raw.cashAdjustments : base.cashAdjustments,
+    bills: Array.isArray(raw.bills) ? raw.bills : base.bills,
+    debts: Array.isArray(raw.debts) ? raw.debts : base.debts,
+    expenses: Array.isArray(raw.expenses) ? raw.expenses : base.expenses,
+    housingBuckets: Array.isArray(raw.housingBuckets) ? raw.housingBuckets : base.housingBuckets,
+    goals: Array.isArray(raw.goals) ? raw.goals : base.goals,
+    deductionRules: Array.isArray(raw.deductionRules) ? raw.deductionRules : base.deductionRules,
+    categories: Array.isArray(raw.categories) ? raw.categories : base.categories,
+    labels: Array.isArray(raw.labels) ? raw.labels : base.labels,
+    tellerEnrollments: Array.isArray(raw.tellerEnrollments) ? raw.tellerEnrollments : base.tellerEnrollments,
+    settings:
+      raw.settings && typeof raw.settings === "object" && !Array.isArray(raw.settings)
+        ? { ...(base.settings as Record<string, unknown>), ...(raw.settings as Record<string, unknown>) }
+        : base.settings,
+    notificationSettings:
+      raw.notificationSettings && typeof raw.notificationSettings === "object" && !Array.isArray(raw.notificationSettings)
+        ? {
+            ...(base.notificationSettings as Record<string, unknown>),
+            ...(raw.notificationSettings as Record<string, unknown>),
+          }
+        : base.notificationSettings,
+    exportMetadata:
+      raw.exportMetadata && typeof raw.exportMetadata === "object" && !Array.isArray(raw.exportMetadata)
+        ? { ...(base.exportMetadata as Record<string, unknown>), ...(raw.exportMetadata as Record<string, unknown>) }
+        : base.exportMetadata,
+    demoModeState:
+      raw.demoModeState && typeof raw.demoModeState === "object" && !Array.isArray(raw.demoModeState)
+        ? { ...(base.demoModeState as Record<string, unknown>), ...(raw.demoModeState as Record<string, unknown>) }
+        : base.demoModeState,
+  };
+}
+
+function syncPlannerSnapshotDraft(force = false) {
+  const row = toPlannerStateRow(state.plannerSnapshot);
+  const nextDraft = plannerSnapshotPretty(row?.snapshot ?? createDefaultPlannerSnapshot());
+  if (force || !state.plannerSnapshotDirty || !state.plannerSnapshotDraft.trim()) {
+    state.plannerSnapshotDraft = nextDraft;
+    state.plannerSnapshotDirty = false;
+    state.plannerSnapshotSaveError = null;
+  }
 }
 
 async function loadProfile(userId: string) {
@@ -424,13 +755,12 @@ async function loadPlannerSnapshot() {
   state.plannerLoadError = null;
   if (!state.session?.user?.id) {
     state.plannerSnapshot = null;
+    syncPlannerSnapshotDraft(true);
     return;
   }
   const { data, error } = await supabase
     .from("planner_snapshots")
-    .select(
-      "id, user_id, plan, snapshot, created_at, updated_at, source_platform, source_app_version, source_updated_at, planner_schema_version, planner_engine_version",
-    )
+    .select(PLANNER_SNAPSHOT_SELECT)
     .eq("user_id", state.session.user.id)
     .order("updated_at", { ascending: false })
     .limit(1)
@@ -441,6 +771,7 @@ async function loadPlannerSnapshot() {
     return;
   }
   state.plannerSnapshot = data ?? null;
+  syncPlannerSnapshotDraft(false);
 }
 
 async function reloadPlannerFromSupabase() {
@@ -449,10 +780,169 @@ async function reloadPlannerFromSupabase() {
   render();
   try {
     await loadPlannerSnapshot();
+    await loadNormalizedAndRecompute();
   } finally {
     state.plannerSyncBusy = false;
     render();
   }
+}
+
+async function loadNormalizedAndRecompute(options: { persist?: boolean } = { persist: true }) {
+  const userId = state.session?.user?.id ?? (await currentUserId());
+  if (!userId) {
+    state.normalizedSnapshot = null;
+    return;
+  }
+  state.normalizedSnapshotBusy = true;
+  state.normalizedSnapshotError = null;
+  render();
+  try {
+    if (options.persist) {
+      const { plan, snapshot } = await recomputeAndPersistPlan(userId);
+      state.normalizedSnapshot = snapshot;
+      state.plannerSnapshot = {
+        ...(typeof state.plannerSnapshot === "object" && state.plannerSnapshot ? state.plannerSnapshot : {}),
+        snapshot,
+        plan,
+        updated_at: new Date().toISOString(),
+      };
+      syncPlannerSnapshotDraft(true);
+    } else {
+      const snapshot = await loadNormalizedSnapshot(userId);
+      state.normalizedSnapshot = snapshot;
+    }
+  } catch (e) {
+    state.normalizedSnapshotError = e instanceof Error ? e.message : String(e);
+  } finally {
+    state.normalizedSnapshotBusy = false;
+    render();
+  }
+}
+
+async function withRecompute<T>(fn: () => Promise<T>, successMessage?: string): Promise<T | null> {
+  state.error = null;
+  state.info = null;
+  state.normalizedSnapshotBusy = true;
+  render();
+  try {
+    const result = await fn();
+    await loadNormalizedAndRecompute({ persist: true });
+    if (successMessage) state.info = successMessage;
+    return result;
+  } catch (e) {
+    state.error = e instanceof Error ? e.message : String(e);
+    return null;
+  } finally {
+    state.normalizedSnapshotBusy = false;
+    render();
+  }
+}
+
+async function savePlannerSnapshotDraft() {
+  if (!state.session?.user?.id) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(state.plannerSnapshotDraft);
+  } catch (e) {
+    state.plannerSnapshotSaveError = `Planner data must be valid JSON before saving. ${e instanceof Error ? e.message : ""}`.trim();
+    render();
+    return;
+  }
+
+  const snapshot = coercePlannerSnapshotShape(parsed);
+  const row = toPlannerStateRow(state.plannerSnapshot);
+  state.plannerSnapshotSaveBusy = true;
+  state.plannerSnapshotSaveError = null;
+  state.error = null;
+  render();
+  const payload = {
+    user_id: state.session.user.id,
+    snapshot,
+    plan: null,
+    source_platform: "web",
+    source_app_version: "bank-portal",
+    source_updated_at: new Date().toISOString(),
+    planner_schema_version: row?.planner_schema_version ?? "billpayer-shared-v1",
+    planner_engine_version: null,
+  };
+  const { data, error } = await supabase
+    .from("planner_snapshots")
+    .upsert(payload, { onConflict: "user_id" })
+    .select(PLANNER_SNAPSHOT_SELECT)
+    .single();
+  state.plannerSnapshotSaveBusy = false;
+  if (error) {
+    state.plannerSnapshotSaveError = error.message;
+    render();
+    return;
+  }
+  state.plannerSnapshot = data ?? payload;
+  state.plannerLoadError = null;
+  state.plannerSnapshotDirty = false;
+  syncPlannerSnapshotDraft(true);
+  state.info = "Planner inputs saved for this account. Planner output will refresh after the shared engine recalculates.";
+  render();
+}
+
+function resetPlannerSnapshotDraftToCurrent() {
+  syncPlannerSnapshotDraft(true);
+  render();
+}
+
+function seedPlannerSnapshotDraftWithTemplate() {
+  state.plannerSnapshotDraft = plannerSnapshotPretty(createDefaultPlannerSnapshot());
+  state.plannerSnapshotDirty = true;
+  state.plannerSnapshotSaveError = null;
+  render();
+}
+
+function formatPlannerSnapshotDraft() {
+  try {
+    const parsed = JSON.parse(state.plannerSnapshotDraft);
+    state.plannerSnapshotDraft = plannerSnapshotPretty(coercePlannerSnapshotShape(parsed));
+    state.plannerSnapshotDirty = true;
+    state.plannerSnapshotSaveError = null;
+  } catch (e) {
+    state.plannerSnapshotSaveError = `Could not format planner data. ${e instanceof Error ? e.message : ""}`.trim();
+  }
+  render();
+}
+
+function parseSectionJsonField(form: FormData, field: string): unknown {
+  const raw = String(form.get(field) ?? "").trim();
+  if (!raw) return null;
+  return JSON.parse(raw);
+}
+
+function collectPlannerSnapshotFromSectionForm(formEl: HTMLFormElement): Record<string, unknown> {
+  const form = new FormData(formEl);
+  const current = coercePlannerSnapshotShape(toPlannerStateRow(state.plannerSnapshot)?.snapshot ?? createDefaultPlannerSnapshot());
+  return coercePlannerSnapshotShape({
+    ...current,
+    today: String(form.get("planner-section-today") ?? current.today ?? todayIsoDate()),
+    accounts: parseSectionJsonField(form, "planner-section-accounts"),
+    incomeSources: parseSectionJsonField(form, "planner-section-incomeSources"),
+    bills: parseSectionJsonField(form, "planner-section-bills"),
+    expenses: parseSectionJsonField(form, "planner-section-expenses"),
+    debts: parseSectionJsonField(form, "planner-section-debts"),
+    housingConfig: parseSectionJsonField(form, "planner-section-housingConfig"),
+    housingBuckets: parseSectionJsonField(form, "planner-section-housingBuckets"),
+    paychecks: parseSectionJsonField(form, "planner-section-paychecks"),
+    paycheckActions: parseSectionJsonField(form, "planner-section-paycheckActions"),
+    billPayments: parseSectionJsonField(form, "planner-section-billPayments"),
+    debtTransactions: parseSectionJsonField(form, "planner-section-debtTransactions"),
+    expenseSpends: parseSectionJsonField(form, "planner-section-expenseSpends"),
+    housingPayments: parseSectionJsonField(form, "planner-section-housingPayments"),
+    cashAdjustments: parseSectionJsonField(form, "planner-section-cashAdjustments"),
+    goals: parseSectionJsonField(form, "planner-section-goals"),
+    deductionRules: parseSectionJsonField(form, "planner-section-deductionRules"),
+    settings: parseSectionJsonField(form, "planner-section-settings"),
+    categories: parseSectionJsonField(form, "planner-section-categories"),
+    labels: parseSectionJsonField(form, "planner-section-labels"),
+    notificationSettings: parseSectionJsonField(form, "planner-section-notificationSettings"),
+    exportMetadata: parseSectionJsonField(form, "planner-section-exportMetadata"),
+    demoModeState: parseSectionJsonField(form, "planner-section-demoModeState"),
+  });
 }
 
 async function fetchNonce(): Promise<string> {
@@ -1010,6 +1500,101 @@ function renderGoalProgressGrid(plan: PlannerPlan) {
     .join("")}</div>`;
 }
 
+function renderSetupOptionList(items: WebSetupOption[], emptyCopy: string) {
+  if (!items.length) return `<p class="muted">${escapeHtml(emptyCopy)}</p>`;
+  return `<div class="fx-mini-list">${items
+    .map(
+      (item) => `
+        <article class="fx-mini-list__item">
+          <div>
+            <strong>${escapeHtml(item.title)}</strong>
+            <p>${escapeHtml(`${item.subtitle} — ${item.description}`)}</p>
+          </div>
+        </article>
+      `,
+    )
+    .join("")}</div>`;
+}
+
+function jsonFieldValue(value: unknown): string {
+  return JSON.stringify(value ?? null, null, 2);
+}
+
+function renderPlannerSectionJsonField(
+  id: string,
+  label: string,
+  help: string,
+  value: unknown,
+  rows = 8,
+) {
+  return `
+    <label class="field">
+      ${escapeHtml(label)}
+      <textarea id="${escapeHtml(id)}" name="${escapeHtml(id)}" rows="${rows}" spellcheck="false" style="width:100%;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">${escapeHtml(
+        jsonFieldValue(value),
+      )}</textarea>
+      <span class="muted">${escapeHtml(help)}</span>
+    </label>
+  `;
+}
+
+function renderSetupGroups(groups: WebSetupGroup[]) {
+  const mid = Math.ceil(groups.length / 2);
+  const columns = [groups.slice(0, mid), groups.slice(mid)];
+  return `<div class="fx-layout fx-layout--split">${columns
+    .map(
+      (column) => `
+        <div class="fx-stack">
+          ${column
+            .map(
+              (group) => `
+                <section class="fx-panel">
+                  <p class="fx-eyebrow">${escapeHtml(group.title)}</p>
+                  <h2>${escapeHtml(group.subtitle)}</h2>
+                  <p class="muted">${escapeHtml(group.description)}</p>
+                  ${renderSetupOptionList(group.options, "No options in this group yet.")}
+                </section>
+              `,
+            )
+            .join("")}
+        </div>
+      `,
+    )
+    .join("")}</div>`;
+}
+
+function renderSetupStarter(
+  eyebrow: string,
+  title: string,
+  body: string,
+  secondaryTitle: string,
+  secondaryBody: string,
+) {
+  return `
+    <div class="fx-stack">
+      <section class="fx-panel fx-panel--highlight">
+        <p class="fx-eyebrow">${escapeHtml(eyebrow)}</p>
+        <h2>${escapeHtml(title)}</h2>
+        <p class="muted">${escapeHtml(body)}</p>
+      </section>
+      <div class="fx-layout fx-layout--split">
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Add first</p>
+          <h2>Planner inputs</h2>
+          ${renderSetupOptionList(CORE_SETUP_OPTIONS, "No setup items yet.")}
+          <p class="muted" style="margin-top:12px">Open <a href="#/settings">Settings</a> for the full checklist, or use the Android app to enter the data today.</p>
+        </section>
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Then</p>
+          <h2>${escapeHtml(secondaryTitle)}</h2>
+          <p class="muted">${escapeHtml(secondaryBody)}</p>
+          <p class="muted">After the same account has planner data, this web app can render the same safe-to-spend and timeline automatically.</p>
+        </section>
+      </div>
+    </div>
+  `;
+}
+
 function renderSignedInInfoPage(route: RouteId) {
   switch (route) {
     case "privacy":
@@ -1057,13 +1642,13 @@ function renderSignedInInfoPage(route: RouteId) {
 
 function renderAppHome(plannerState: PlannerStateRow | null, plan: PlannerPlan | null) {
   if (!plan) {
-    return `
-      <section class="fx-panel fx-panel--highlight">
-        <p class="fx-eyebrow">Home</p>
-        <h2>No synced planner yet</h2>
-        <p class="muted">Supabase auth, database, and bank connections are ready. Next step is syncing BillPayer’s deterministic <code>PlannerSnapshot</code> and <code>PlannerPlan</code> into <code>planner_snapshots</code> so the web app can render the same safe-to-spend and timeline.</p>
-      </section>
-    `;
+    return renderSetupStarter(
+      "Home",
+      "You have not added enough information yet",
+      "BillPayer needs your core money setup before it can show a real safe-to-spend amount here.",
+      "Sync the planner",
+      "Once those inputs exist on the same signed-in account, the latest planner snapshot will appear here automatically.",
+    );
   }
 
   const safe = planSafeToSpend(plan);
@@ -1162,15 +1747,19 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
     return `
       <div class="fx-stack fx-stack--planner">
         ${loadErr}
-        <section class="fx-panel fx-panel--highlight">
+        ${renderSetupStarter(
+          "Planner",
+          "No planner guidance yet",
+          "This page fills in after you add your plan information and a planner snapshot exists for this signed-in account.",
+          "Reload when ready",
+          "Use Reload from Supabase after you add data in the app or finish syncing from the same account.",
+        )}
+        <section class="fx-panel">
           <div class="fx-planner-head__row">
             <div>
               <p class="fx-eyebrow">Planner</p>
-              <h2>Connect Supabase + sync a plan row</h2>
-              <p class="muted">
-                This screen reads your latest <code>planner_snapshots</code> row for your user id (JSON <code>plan</code> column = BillPayer <code>PlannerPlan</code>).
-                Math stays on the shared engine; the web app only renders what Postgres returns.
-              </p>
+              <h2>Reload latest snapshot</h2>
+              <p class="muted">When your planner data has been added and synced, reload here to pull the newest safe-to-spend, timeline, and guidance.</p>
             </div>
             <div class="fx-planner-head__actions">
               <button type="button" class="secondary" id="btn-refresh-planner" ${syncDisabled ? "disabled" : ""}>${state.plannerSyncBusy ? "Loading…" : "Reload from Supabase"}</button>
@@ -1350,13 +1939,13 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
 
 function renderBillsWorkspace(plan: PlannerPlan | null) {
   if (!plan) {
-    return `
-      <section class="fx-panel">
-        <p class="fx-eyebrow">Bills</p>
-        <h2>No planner-backed bill data yet</h2>
-        <p class="muted">This page will render the same due-now, due-soon, overdue, and delayable lists the Android app already computes.</p>
-      </section>
-    `;
+    return renderSetupStarter(
+      "Bills",
+      "No bill guidance yet",
+      "Bill lists stay empty until your bills, income, and other planner inputs have been added for this account.",
+      "What will show up here",
+      "After setup, this page will show what must be paid now, what is due soon, and what can safely wait.",
+    );
   }
 
   return `
@@ -1407,8 +1996,8 @@ function renderAccountsWorkspace(
   return `
     <section class="fx-panel">
       <p class="fx-eyebrow">Accounts</p>
-      <h2>Connect and refresh real balances</h2>
-      <p class="muted">This is the Supabase + Teller layer from the website stack. It remains the shared backend entrypoint while the planner stays canonical in BillPayer.</p>
+      <h2>Accounts and bank connections</h2>
+      <p class="muted">Connect a bank here to pull live balances and transactions, then use Settings to finish the rest of your planner setup.</p>
       <div class="row">
         <button type="button" id="btn-teller" ${busy ? "disabled" : ""}>Connect my bank</button>
         <button type="button" class="secondary" id="btn-refresh" ${busy ? "disabled" : ""}>Refresh data</button>
@@ -1426,7 +2015,14 @@ function renderAccountsWorkspace(
         <section class="fx-panel">
           <p class="fx-eyebrow">Accounts</p>
           <h2>Linked money sources</h2>
-          ${rows.length ? `<div class="list">${rows.join("")}</div>` : `<p class="muted">Link a bank above to see checking, savings, and more—where your paychecks actually land.</p>`}
+          ${
+            rows.length
+              ? `<div class="list">${rows.join("")}</div>`
+              : `<div class="fx-stack">
+                  <p class="muted">No linked or refreshed accounts yet. Connect a bank above, then open <a href="#/settings">Settings</a> to work through the same setup checklist the app uses.</p>
+                  ${renderSetupOptionList(CORE_SETUP_OPTIONS.slice(0, 3), "No starter items yet.")}
+                </div>`
+          }
         </section>
       </div>
       <div class="fx-stack">
@@ -1434,7 +2030,15 @@ function renderAccountsWorkspace(
           <p class="fx-eyebrow">Activity</p>
           <h2>Transactions</h2>
           <div class="tx-feed">
-            ${txRows.length ? txRows.join("") : `<p class="muted" style="padding:16px;margin:0">Connect an account and pick it above to load your stream.</p>`}
+            ${
+              txRows.length
+                ? txRows.join("")
+                : `<p class="muted" style="padding:16px;margin:0">${
+                    rows.length
+                      ? "Pick an account above to load its transactions."
+                      : "Transactions will appear here after you connect a bank, refresh, and choose an account."
+                  }</p>`
+            }
           </div>
         </section>
       </div>
@@ -1449,6 +2053,8 @@ function renderSettingsWorkspace(
   busy: boolean,
   plannerState: PlannerStateRow | null,
 ) {
+  const snapshotSource = plannerState?.snapshot ?? createDefaultPlannerSnapshot();
+  const snapshot = coercePlannerSnapshotShape(snapshotSource);
   return `
     <div class="fx-layout fx-layout--split">
       <div class="fx-stack">
@@ -1487,6 +2093,11 @@ function renderSettingsWorkspace(
             <label class="field">Custom accent<input id="field-color-picker" type="color" value="${escapeHtml(accent)}" aria-label="Custom accent color" /></label>
           </div>
         </section>
+        <section class="fx-panel fx-panel--highlight">
+          <p class="fx-eyebrow">Setup guide</p>
+          <h2>Same options as the app</h2>
+          <p class="muted">Use this checklist to see the same Setup, Planning, App, and Data options the Android app exposes today.</p>
+        </section>
       </div>
 
       <div class="fx-stack">
@@ -1504,6 +2115,88 @@ function renderSettingsWorkspace(
         </section>
       </div>
     </div>
+    ${renderSetupGroups(WEB_SETTINGS_GROUPS)}
+    <form id="form-planner-sections" class="fx-stack">
+      <section class="fx-panel fx-panel--highlight">
+        <p class="fx-eyebrow">Web setup editor</p>
+        <h2>Save the same planner sections your app account uses</h2>
+        <p class="muted">Edit the planner snapshot section by section below, then save it to this signed-in account. This mirrors the app’s account inputs more directly than the old checklist-only view.</p>
+        <div class="row" style="margin-top:12px">
+          <button type="submit" ${state.plannerSnapshotSaveBusy ? "disabled" : ""}>${state.plannerSnapshotSaveBusy ? "Saving…" : "Save all sections"}</button>
+        </div>
+      </section>
+
+      <section class="fx-panel">
+        <p class="fx-eyebrow">Setup</p>
+        <h2>Core planner inputs</h2>
+        <label class="field">
+          Today
+          <input id="planner-section-today" name="planner-section-today" type="date" value="${escapeHtml(String(snapshot.today ?? todayIsoDate()))}" />
+          <span class="muted">Planner snapshot anchor date.</span>
+        </label>
+        ${renderPlannerSectionJsonField("planner-section-accounts", "Accounts", "Same account list used by the app planner.", snapshot.accounts, 8)}
+        ${renderPlannerSectionJsonField("planner-section-incomeSources", "Income sources", "Pay sources, recurring rules, and amount ranges.", snapshot.incomeSources, 8)}
+        ${renderPlannerSectionJsonField("planner-section-bills", "Bills", "Due amounts, recurring rules, and bill policies.", snapshot.bills, 8)}
+        ${renderPlannerSectionJsonField("planner-section-expenses", "Expenses", "Recurring and essential spending inputs.", snapshot.expenses, 8)}
+        ${renderPlannerSectionJsonField("planner-section-debts", "Debts", "Balances, due dates, status, and payoff behavior.", snapshot.debts, 8)}
+        ${renderPlannerSectionJsonField("planner-section-housingConfig", "Housing config", "Rent or mortgage setup. Use null if not configured yet.", snapshot.housingConfig, 8)}
+        ${renderPlannerSectionJsonField("planner-section-housingBuckets", "Housing buckets", "Current and arrears bucket details.", snapshot.housingBuckets, 8)}
+      </section>
+
+      <section class="fx-panel">
+        <p class="fx-eyebrow">Activity</p>
+        <h2>Recorded activity and actuals</h2>
+        ${renderPlannerSectionJsonField("planner-section-paychecks", "Paychecks", "Recorded real or forecasted paychecks.", snapshot.paychecks, 8)}
+        ${renderPlannerSectionJsonField("planner-section-paycheckActions", "Paycheck actions", "Bill groups and essential allocations attached to paychecks.", snapshot.paycheckActions, 8)}
+        ${renderPlannerSectionJsonField("planner-section-billPayments", "Bill payments", "Payments already made against bills.", snapshot.billPayments, 8)}
+        ${renderPlannerSectionJsonField("planner-section-debtTransactions", "Debt transactions", "Debt payments, borrow events, and repayments.", snapshot.debtTransactions, 8)}
+        ${renderPlannerSectionJsonField("planner-section-expenseSpends", "Expense spending", "Actual spend entries for recurring expenses.", snapshot.expenseSpends, 8)}
+        ${renderPlannerSectionJsonField("planner-section-housingPayments", "Housing payments", "Actual rent or housing payment records.", snapshot.housingPayments, 8)}
+        ${renderPlannerSectionJsonField("planner-section-cashAdjustments", "Cash adjustments", "Cash in, cash out, reimbursements, refunds, and corrections.", snapshot.cashAdjustments, 8)}
+      </section>
+
+      <section class="fx-panel">
+        <p class="fx-eyebrow">Planning</p>
+        <h2>Goals, rules, and preferences</h2>
+        ${renderPlannerSectionJsonField("planner-section-goals", "Goals", "Savings and target goals.", snapshot.goals, 8)}
+        ${renderPlannerSectionJsonField("planner-section-deductionRules", "Paycheck rules", "Mandatory or optional paycheck deductions.", snapshot.deductionRules, 8)}
+        ${renderPlannerSectionJsonField("planner-section-settings", "Planner settings", "Planning preferences, reserve rules, scenario mode, and safety settings.", snapshot.settings, 10)}
+      </section>
+
+      <section class="fx-panel">
+        <p class="fx-eyebrow">App</p>
+        <h2>Organization and reminders</h2>
+        ${renderPlannerSectionJsonField("planner-section-categories", "Categories", "User-defined categories.", snapshot.categories, 6)}
+        ${renderPlannerSectionJsonField("planner-section-labels", "Custom labels", "User-defined labels.", snapshot.labels, 6)}
+        ${renderPlannerSectionJsonField("planner-section-notificationSettings", "Notification settings", "Payday and planner reminder settings.", snapshot.notificationSettings, 8)}
+      </section>
+
+      <section class="fx-panel">
+        <p class="fx-eyebrow">Data</p>
+        <h2>Backup and app metadata</h2>
+        ${renderPlannerSectionJsonField("planner-section-exportMetadata", "Export metadata", "Backup/import metadata saved in the snapshot.", snapshot.exportMetadata, 6)}
+        ${renderPlannerSectionJsonField("planner-section-demoModeState", "Demo mode state", "App mode metadata carried in the canonical snapshot.", snapshot.demoModeState, 6)}
+      </section>
+    </form>
+    <section class="fx-panel fx-panel--highlight">
+      <p class="fx-eyebrow">Planner data</p>
+      <h2>Save full planner inputs for this account</h2>
+      <p class="muted">This editor saves the canonical <code>PlannerSnapshot</code> JSON for your signed-in account, including accounts, income, paychecks, bills, expenses, debts, housing, goals, paycheck rules, categories, labels, notifications, and planner settings.</p>
+      <div class="row" style="margin:12px 0">
+        <button type="button" class="secondary" id="btn-planner-template" ${state.plannerSnapshotSaveBusy ? "disabled" : ""}>Load starter template</button>
+        <button type="button" class="secondary" id="btn-planner-reset" ${state.plannerSnapshotSaveBusy ? "disabled" : ""}>Reset to current saved snapshot</button>
+        <button type="button" class="secondary" id="btn-planner-format" ${state.plannerSnapshotSaveBusy ? "disabled" : ""}>Format JSON</button>
+        <button type="button" id="btn-planner-save" ${state.plannerSnapshotSaveBusy ? "disabled" : ""}>${state.plannerSnapshotSaveBusy ? "Saving…" : "Save planner inputs"}</button>
+      </div>
+      <p class="muted">Current row source: <strong>${escapeHtml(plannerState?.source_platform ?? "none yet")}</strong> · planner output: <strong>${plannerState?.plan ? "present" : "none"}</strong>. Saving from web clears any stale plan until the shared planner engine recalculates.</p>
+      <label class="field" style="margin-top:12px">
+        PlannerSnapshot JSON
+        <textarea id="field-planner-snapshot" rows="28" spellcheck="false" style="width:100%;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">${escapeHtml(
+          state.plannerSnapshotDraft || plannerSnapshotPretty(snapshotSource),
+        )}</textarea>
+      </label>
+      ${state.plannerSnapshotSaveError ? `<p class="error">${escapeHtml(state.plannerSnapshotSaveError)}</p>` : ""}
+    </section>
   `;
 }
 
@@ -1940,6 +2633,7 @@ function wireApp() {
   const accentInput = document.querySelector<HTMLInputElement>("#field-accent");
   const colorPicker = document.querySelector<HTMLInputElement>("#field-color-picker");
   const modeInput = document.querySelector<HTMLInputElement>("#field-mode");
+  const plannerSnapshotInput = document.querySelector<HTMLTextAreaElement>("#field-planner-snapshot");
 
   document.querySelector<HTMLButtonElement>("#btn-signout")?.addEventListener("click", async () => {
     state.busy = true;
@@ -1948,6 +2642,10 @@ function wireApp() {
     state.session = null;
     state.profile = null;
     state.plannerSnapshot = null;
+    state.plannerSnapshotDraft = "";
+    state.plannerSnapshotDirty = false;
+    state.plannerSnapshotSaveBusy = false;
+    state.plannerSnapshotSaveError = null;
     state.plannerLoadError = null;
     state.plannerSyncBusy = false;
     state.accounts = [];
@@ -1968,6 +2666,19 @@ function wireApp() {
     applyFullTheme(accent_color);
     applyMode(theme_mode);
     await saveProfile({ display_name: display_name || null, accent_color, theme_mode });
+  });
+
+  document.querySelector<HTMLFormElement>("#form-planner-sections")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const snapshot = collectPlannerSnapshotFromSectionForm(e.target as HTMLFormElement);
+      state.plannerSnapshotDraft = plannerSnapshotPretty(snapshot);
+      state.plannerSnapshotDirty = true;
+      state.plannerSnapshotSaveError = null;
+      await savePlannerSnapshotDraft();
+    } catch (err) {
+      window.alert(err instanceof Error ? `Could not save planner sections: ${err.message}` : "Could not save planner sections.");
+    }
   });
 
   document.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((btn) => {
@@ -2014,6 +2725,28 @@ function wireApp() {
     void reloadPlannerFromSupabase();
   });
 
+  plannerSnapshotInput?.addEventListener("input", () => {
+    state.plannerSnapshotDraft = plannerSnapshotInput.value;
+    state.plannerSnapshotDirty = true;
+    state.plannerSnapshotSaveError = null;
+  });
+
+  document.querySelector<HTMLButtonElement>("#btn-planner-save")?.addEventListener("click", () => {
+    void savePlannerSnapshotDraft();
+  });
+
+  document.querySelector<HTMLButtonElement>("#btn-planner-reset")?.addEventListener("click", () => {
+    resetPlannerSnapshotDraftToCurrent();
+  });
+
+  document.querySelector<HTMLButtonElement>("#btn-planner-template")?.addEventListener("click", () => {
+    seedPlannerSnapshotDraftWithTemplate();
+  });
+
+  document.querySelector<HTMLButtonElement>("#btn-planner-format")?.addEventListener("click", () => {
+    formatPlannerSnapshotDraft();
+  });
+
   document.querySelectorAll<HTMLButtonElement>("[data-pick-account]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const id = btn.getAttribute("data-pick-account");
@@ -2043,6 +2776,7 @@ async function init() {
       try {
         await loadProfile(state.session.user.id);
         await loadPlannerSnapshot();
+        await loadNormalizedAndRecompute({ persist: true });
         await refreshBankData();
       } catch (e) {
         state.error = e instanceof Error ? e.message : String(e);
@@ -2059,6 +2793,7 @@ async function init() {
         try {
           await loadProfile(session.user.id);
           await loadPlannerSnapshot();
+          await loadNormalizedAndRecompute({ persist: true });
           await refreshBankData();
         } catch (e) {
           state.error = e instanceof Error ? e.message : String(e);
@@ -2066,8 +2801,16 @@ async function init() {
       } else {
         state.profile = null;
         state.plannerSnapshot = null;
+        state.plannerSnapshotDraft = "";
+        state.plannerSnapshotDirty = false;
+        state.plannerSnapshotSaveBusy = false;
+        state.plannerSnapshotSaveError = null;
         state.plannerLoadError = null;
         state.plannerSyncBusy = false;
+        state.normalizedSnapshot = null;
+        state.normalizedSnapshotBusy = false;
+        state.normalizedSnapshotError = null;
+        state.settingsEditor = null;
         state.accounts = [];
         state.transactions = [];
       }
