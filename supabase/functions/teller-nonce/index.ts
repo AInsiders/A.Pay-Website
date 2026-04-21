@@ -1,9 +1,9 @@
-import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import { jsonResponse, preflightResponse } from "../_shared/cors.ts";
 import { supabaseServiceClient, supabaseUserClient } from "../_shared/supabase.ts";
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
+    return preflightResponse();
   }
   if (req.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, 405);

@@ -1,4 +1,4 @@
-import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import { jsonResponse, preflightResponse } from "../_shared/cors.ts";
 import { supabaseServiceClient } from "../_shared/supabase.ts";
 
 async function hmacSha256Hex(secret: string, message: string): Promise<string> {
@@ -30,7 +30,7 @@ function timingSafeEqualBytes(a: Uint8Array, b: Uint8Array): boolean {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
+    return preflightResponse();
   }
   if (req.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, 405);

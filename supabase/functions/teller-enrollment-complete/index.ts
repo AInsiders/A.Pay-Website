@@ -1,5 +1,5 @@
 import { verify } from "npm:@noble/ed25519@1.7.3";
-import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import { corsHeaders, jsonResponse, preflightResponse } from "../_shared/cors.ts";
 import { supabaseServiceClient, supabaseUserClient } from "../_shared/supabase.ts";
 
 const FN = "teller-enrollment-complete";
@@ -76,7 +76,7 @@ async function sha256Bytes(dotted: string): Promise<Uint8Array> {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
+    return preflightResponse();
   }
   if (req.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, 405);

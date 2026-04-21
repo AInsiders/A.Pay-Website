@@ -38,6 +38,8 @@ In Supabase → **Authentication** → **URL Configuration**:
   - `http://localhost:4173/**` (`npm run preview` after a build — default Vite preview port)
   - `https://you.github.io/repo/**` (match your Pages URL)
 
+**Example (organization site):** if the app is served from `https://ainsiders.github.io` (with or without a repo path), set **Site URL** to `https://ainsiders.github.io` and add **`https://ainsiders.github.io/**`** to **Redirect URLs** so magic links and OAuth returns match the live origin.
+
 ### 3. Database migrations (run once per project)
 
 Either:
@@ -56,7 +58,20 @@ supabase functions deploy teller-data --no-verify-jwt
 supabase functions deploy teller-webhook --no-verify-jwt
 ```
 
+From the repo root you can run all four in one go:
+
+- **Windows (PowerShell):** `.\scripts\deploy-teller-edge-functions.ps1`
+- **macOS / Linux:** `chmod +x scripts/deploy-teller-edge-functions.sh && ./scripts/deploy-teller-edge-functions.sh`
+
+After deploy, open **Supabase Dashboard → Edge Functions**, select each Teller function, and confirm **Verify JWT** is **off**. If it is still on, run the deploy commands again with `--no-verify-jwt` or toggle it off in the dashboard.
+
 `supabase/config.toml` matches this for local `supabase functions serve`; redeploy after changing function code.
+
+#### GitHub Pages: “CORS” / `No Access-Control-Allow-Origin` on `teller-enrollment-complete`
+
+If the browser console shows **CORS blocked** or **`net::ERR_FAILED`** on `…/functions/v1/teller-enrollment-complete` while the site is on **GitHub Pages** (e.g. `https://ainsiders.github.io`), the usual cause is **not** missing headers in your function code for successful responses—it is the **API gateway rejecting the session JWT before your Deno code runs** (hosted **Verify JWT** still on, or deploy without `--no-verify-jwt`). Gateway errors often **omit** `Access-Control-Allow-Origin`, so DevTools reports a CORS failure instead of **401 Unsupported JWT algorithm**.
+
+**Fix:** redeploy all Teller functions with **`--no-verify-jwt`** (commands above or `scripts/deploy-teller-edge-functions.*`), confirm **Verify JWT** is off in the dashboard, then retry **Connect my bank**. Your functions still validate the caller with `getUser()` inside the handler.
 
 In Supabase → **Edge Functions** → **Secrets**, set at least:
 
@@ -123,6 +138,19 @@ The app calls **`teller-nonce`** (and other functions) on your Supabase project.
 
 **Connect my bank** opens Teller in a **full-page iframe** (`teller.io`). You complete institution search and credentials **inside that overlay**; browser automation from the host page cannot drive those fields (cross-origin). After success, use **Refresh data** if accounts do not appear immediately.
 
+### Edge Function logs (when enrollment or bank sync still fails)
+
+Use **Supabase Dashboard → Edge Functions → [function] → Logs** (or **Log Explorer**).
+
+| What to look for | Meaning |
+|------------------|--------|
+| **worker boot error**, **BOOT_ERROR**, import / compile errors | Fix the function code or dependencies, then redeploy. |
+| **`signature_verify_failed`** / **401** from `teller-enrollment-complete` | Teller signing key env (`TELLER_TOKEN_SIGNING_PUBLIC_KEY`) does not match the Teller app, or payload signatures did not verify. |
+| **Database errors** on `teller_nonces` or `teller_enrollments` | Run migrations; check **Secrets** include `SUPABASE_SERVICE_ROLE_KEY` for the Edge runtime. |
+| **`nonce_lookup_failed`** / missing nonce | Clock skew, expired nonce, or `teller-nonce` / Connect flow did not align with the signed-in user. |
+
+If logs show **no invocation** for `teller-enrollment-complete` while the browser reports CORS, the request was likely **stopped at the gateway** (JWT verify)—redeploy with `--no-verify-jwt` as above.
+
 ---
 
 ## What you do **not** need to invent
@@ -137,7 +165,7 @@ The app calls **`teller-nonce`** (and other functions) on your Supabase project.
 
 - [ ] Create Supabase project (free tier is fine).
 - [ ] Copy **URL** + **anon** key into `bank-portal/.env` and GitHub Actions secrets.
-- [ ] Set **Auth redirect URLs** for localhost + your GitHub Pages URL.
+- [ ] Set **Auth redirect URLs** for localhost + your GitHub Pages URL (e.g. `https://ainsiders.github.io/**` if that is your host).
 - [ ] Apply **migrations**.
 - [ ] Deploy **Edge Functions** with **`--no-verify-jwt`** on Teller functions (see commands above); add Teller secrets + `VITE_TELLER_*` when testing bank link.
 - [ ] Push to `main` (or run the workflow manually) so **GitHub Pages** builds with secrets.
