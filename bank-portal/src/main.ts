@@ -1898,7 +1898,7 @@ function renderAppHome(plannerState: PlannerStateRow | null, plan: PlannerPlan |
         <p class="muted">What is free after the next-income checkpoint: essentials, hard dues, and cross-paycheck reserves.</p>
       </div>
       <div class="fx-app-hero__meta">
-        <span>Protected: <strong>${money(protectedTotal)}</strong></span>
+        <span>Required in wallet: <strong>${money(protectedTotal)}</strong></span>
         <span>Short: <strong>${money(shortAmount)}</strong></span>
       </div>
       ${scenarioSummaries.length
