@@ -1543,10 +1543,17 @@ button:disabled {
   color: #ffd8df;
 }
 
+.banner--alert[role="alert"] {
+  white-space: pre-line;
+  line-height: 1.45;
+}
+
 .error {
   color: #ffb8c8;
   font-size: 0.88rem;
   margin: 8px 0 0;
+  white-space: pre-line;
+  line-height: 1.45;
 }
 
 .success {

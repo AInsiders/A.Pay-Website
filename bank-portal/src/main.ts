@@ -20,29 +20,92 @@ function supabaseHostHint(): string {
   }
 }
 
-function formatAuthError(prefix: string, err: unknown): string {
+type EdgeErrorContext = {
+  /** Supabase Edge Function name for clearer UI copy */
+  edgeFunction?: string;
+};
+
+function formatAuthError(prefix: string, err: unknown, ctx?: EdgeErrorContext): string {
   const host = supabaseHostHint();
   const raw = err instanceof Error ? err.message || String(err) : String(err);
 
+  let detail: string;
   if (/failed to fetch/i.test(raw)) {
-    return `${prefix}: Failed to fetch. Usually network/CORS or invalid Supabase URL. Check VITE_SUPABASE_URL (currently: ${host}).`;
+    detail = `Failed to fetch. Often: network drop, CORS, wrong project URL, or ad-blocker. Confirm VITE_SUPABASE_URL points at this project (host: ${host}).`;
+  } else if (/failed to send a request to the edge function/i.test(raw)) {
+    detail = `Could not complete the request to Edge Functions at ${host}. Try: stable network, disable VPN/ad-block for this site, ensure the Supabase project is not paused, and do not open the app as file:// (use http://localhost:5173 for dev). Bank calls can take up to ${Math.round(TELLER_DATA_INVOKE_TIMEOUT_MS / 1000)}s — check DevTools → Network for the failing …/functions/v1/… URL and status.`;
+  } else {
+    detail = raw;
   }
 
-  // @supabase/supabase-js when `fetch` to Edge Functions throws before any HTTP response
-  if (/failed to send a request to the edge function/i.test(raw)) {
-    return `${prefix}: Could not reach Edge Functions at ${host}. Check: offline/VPN/firewall, browser extensions, Supabase project paused, or opening the app via file:// (use http://localhost:5173). Bank sync waits up to ${Math.round(TELLER_DATA_INVOKE_TIMEOUT_MS / 1000)}s for Teller—if it still fails, inspect DevTools → Network for …/functions/v1/teller-data.`;
+  const lines: string[] = [`${prefix}: ${detail}`];
+  if (ctx?.edgeFunction) {
+    lines.push(`Edge function: ${ctx.edgeFunction}.`);
   }
 
-  if (err instanceof Error) {
-    return `${prefix}: ${raw}`;
+  const combined = `${prefix} ${detail} ${raw}`;
+  if (
+    /cors|access-control|failed to send|failed to fetch|net::err_failed|401|403|unsupported jwt|verify jwt|jwt/i.test(
+      combined,
+    )
+  ) {
+    lines.push(
+      `Tip: If you use GitHub Pages or see “CORS” with no response body, the API gateway may be rejecting the session JWT before your function runs. Redeploy with --no-verify-jwt and turn off Verify JWT for Teller functions in Supabase Dashboard (ES256 tokens). See SETUP.md.`,
+    );
   }
-  return `${prefix}: ${raw}`;
+
+  return lines.join("\n\n");
 }
 
 /** Supabase `functions.invoke` hides Edge Function JSON in `FunctionsHttpError.context` — unpack it. */
 /** `teller-data` returns 400 when the user has not completed Teller Connect yet — not a sync failure. */
 function isNoBankEnrollmentMessage(msg: string): boolean {
   return /No bank connection\. Run Teller Connect first\./i.test(msg.trim());
+}
+
+function formatEdgeFunctionJsonBody(body: Record<string, unknown>, status: number): string {
+  const lines: string[] = [];
+  const e0 = typeof body.error === "string" ? body.error.trim() : "";
+  const m0 = typeof body.message === "string" ? body.message.trim() : "";
+  const u0 = typeof body.msg === "string" ? body.msg.trim() : "";
+  const main = e0 || m0 || u0;
+  if (main) lines.push(main);
+
+  const code = typeof body.code === "string" && body.code.trim() ? body.code.trim() : "";
+  if (code && !main?.includes(code)) lines.push(`Code: ${code}`);
+
+  const details = body.details;
+  if (typeof details === "string" && details.trim()) {
+    lines.push(`Details: ${details.trim()}`);
+  } else if (details != null && typeof details === "object") {
+    lines.push(`Details: ${JSON.stringify(details).slice(0, 500)}`);
+  }
+
+  const hint = typeof body.hint === "string" && body.hint.trim() ? body.hint.trim() : "";
+  if (hint) lines.push(`Hint: ${hint}`);
+
+  const sup = body.supabase;
+  if (sup && typeof sup === "object" && sup !== null) {
+    const s = sup as Record<string, unknown>;
+    if (typeof s.code === "string" && s.code.trim()) lines.push(`Supabase code: ${s.code.trim()}`);
+    if (typeof s.details === "string" && s.details.trim()) lines.push(`Supabase details: ${s.details.trim()}`);
+    if (typeof s.hint === "string" && s.hint.trim()) lines.push(`Supabase hint: ${s.hint.trim()}`);
+  }
+
+  const head = lines.filter(Boolean).join("\n");
+  if (!head) {
+    if (status === 401) {
+      return `HTTP ${status} — Unauthorized. Try signing out and back in. If this persists on a hosted site, ensure Edge Functions are deployed with --no-verify-jwt (ES256 session tokens).`;
+    }
+    if (status === 404) {
+      return `HTTP ${status} — Function not found. Deploy it: supabase functions deploy <name> --no-verify-jwt`;
+    }
+    if (status === 403) {
+      return `HTTP ${status} — Forbidden. Check gateway JWT / Verify JWT settings for this function.`;
+    }
+    return `HTTP ${status}`;
+  }
+  return `${head}\n(HTTP ${status})`;
 }
 
 async function edgeFunctionMessage(err: unknown): Promise<string> {
@@ -55,25 +118,17 @@ async function edgeFunctionMessage(err: unknown): Promise<string> {
         if (text) {
           try {
             const body = JSON.parse(text) as Record<string, unknown>;
-            const piece =
-              (typeof body.error === "string" && body.error) ||
-              (typeof body.message === "string" && body.message) ||
-              (typeof body.msg === "string" && body.msg);
-            const errCode = typeof body.code === "string" && body.code.trim()
-              ? body.code.trim()
-              : "";
-            if (piece) {
-              const suffix = errCode ? ` [${errCode}]` : "";
-              return status ? `${piece}${suffix} (HTTP ${status})` : `${piece}${suffix}`;
-            }
+            return formatEdgeFunctionJsonBody(body, status);
           } catch {
-            return status ? `${text.slice(0, 400)} (HTTP ${status})` : text.slice(0, 400);
+            return status ? `${text.slice(0, 600)} (HTTP ${status})` : text.slice(0, 600);
           }
         }
       } catch {
         /* fall through */
       }
-      if (status) return `HTTP ${status}`;
+      if (status) {
+        return formatEdgeFunctionJsonBody({}, status);
+      }
     }
   }
   if (err instanceof Error) return err.message;
@@ -248,7 +303,7 @@ async function refreshBankData() {
     if (payload?.error) throw new Error(payload.error);
     state.accounts = payload.accounts ?? [];
   } catch (e) {
-    state.error = formatAuthError("Bank sync", e);
+    state.error = formatAuthError("Bank sync", e, { edgeFunction: "teller-data" });
     state.accounts = [];
     state.transactions = [];
     state.busy = false;
@@ -285,7 +340,7 @@ async function loadTransactions() {
     if (payload?.error) throw new Error(payload.error);
     state.transactions = payload.transactions ?? [];
   } catch (e) {
-    state.error = formatAuthError("Transaction load", e);
+    state.error = formatAuthError("Transaction load", e, { edgeFunction: "teller-data" });
     state.transactions = [];
   } finally {
     state.busy = false;
@@ -305,7 +360,7 @@ async function fetchNonce(): Promise<string> {
     if (!n) throw new Error("No nonce returned");
     return n;
   } catch (e) {
-    throw new Error(formatAuthError("Teller nonce", e));
+    throw new Error(formatAuthError("Teller nonce", e, { edgeFunction: "teller-nonce" }));
   }
 }
 
@@ -367,7 +422,10 @@ async function startTellerConnect() {
         });
         state.busy = false;
         if (error) {
-          state.error = await edgeFunctionMessage(error);
+          const msg = await edgeFunctionMessage(error);
+          state.error = formatAuthError("Bank link", new Error(msg), {
+            edgeFunction: "teller-enrollment-complete",
+          });
           render();
           return;
         }
