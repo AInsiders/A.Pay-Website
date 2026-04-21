@@ -40,7 +40,15 @@ type Body = {
 };
 
 function decodePublicKey(raw: string): Uint8Array {
-  const t = raw.trim();
+  let t = raw.trim();
+  // Accept PEM blocks by stripping headers/footers and whitespace.
+  if (t.includes("BEGIN") && t.includes("END")) {
+    t = t
+      .replace(/-----BEGIN[^-]+-----/g, "")
+      .replace(/-----END[^-]+-----/g, "")
+      .replace(/\s+/g, "")
+      .trim();
+  }
   if (/^[0-9a-fA-F]+$/.test(t) && t.length === 64) {
     return Uint8Array.from(t.match(/.{2}/g)!.map((b) => parseInt(b, 16)));
   }
@@ -66,7 +74,20 @@ function parsePublicKeys(): Uint8Array[] {
     : single?.trim()
     ? [single.trim()]
     : [];
-  return raw.map(decodePublicKey).filter((k) => k.length === 32);
+  const out: Uint8Array[] = [];
+  for (const r of raw) {
+    try {
+      const k = decodePublicKey(r);
+      if (k.length === 32) out.push(k);
+      else logEvent("bad_signing_key", { reason: "wrong_length", length: k.length });
+    } catch (e) {
+      logEvent("bad_signing_key", {
+        reason: "decode_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+  return out;
 }
 
 async function sha256Bytes(dotted: string): Promise<Uint8Array> {
