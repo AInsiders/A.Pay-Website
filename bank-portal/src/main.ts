@@ -150,6 +150,19 @@ async function bearerAuthHeaders(): Promise<{ Authorization: string }> {
   return { Authorization: `Bearer ${t}` };
 }
 
+/**
+ * Magic-link and password-reset redirects must land on the same path the app is served from
+ * (e.g. GitHub Pages project site: /RepoName/). Using only `window.location.origin` drops the path.
+ */
+function authEmailRedirectUrl(): string {
+  const base = import.meta.env.BASE_URL || "./";
+  try {
+    return new URL(base, window.location.href).href;
+  } catch {
+    return `${window.location.origin}/`;
+  }
+}
+
 const THEME_PRESETS: { id: string; label: string; hex: string }[] = [
   { id: "mint", label: "Cash mint", hex: "#5ee7ff" },
   { id: "bullion", label: "Gold vault", hex: "#e8c547" },
@@ -921,7 +934,6 @@ function wireAuth() {
   const forgot = document.querySelector<HTMLButtonElement>("#btn-forgot");
   const recoveryForm = document.querySelector<HTMLFormElement>("#form-recovery");
 
-  const redirectTo = `${new URL(import.meta.env.BASE_URL, window.location.origin)}`;
   if (!isSupabaseConfigured) {
     // Keep the modal usable for instructions, but prevent confusing network errors.
     form?.addEventListener("submit", (e) => e.preventDefault());
@@ -940,13 +952,30 @@ function wireAuth() {
     state.error = null;
     state.authModalOpen = true;
     render();
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     state.busy = false;
     if (error) {
-      state.error = error.message;
+      state.error = formatAuthError("Sign in", error);
       state.authModalOpen = true;
       render();
       return;
+    }
+    if (data.session) {
+      state.session = data.session;
+      state.authModalOpen = false;
+      state.error = null;
+      try {
+        await loadProfile(data.session.user.id);
+        await refreshBankData();
+      } catch (e) {
+        state.error = e instanceof Error ? e.message : String(e);
+      }
+      render();
+    } else {
+      state.info =
+        "No active session returned. If your project requires email confirmation, open the link in your email first, then try again.";
+      state.authModalOpen = true;
+      render();
     }
   });
   magic?.addEventListener("click", async () => {
@@ -967,7 +996,7 @@ function wireAuth() {
     render();
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: redirectTo },
+      options: { emailRedirectTo: authEmailRedirectUrl() },
     });
     state.busy = false;
     if (error) {
@@ -996,7 +1025,9 @@ function wireAuth() {
     state.info = null;
     state.authModalOpen = true;
     render();
-    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: authEmailRedirectUrl(),
+    });
     state.busy = false;
     if (error) {
       state.error = error.message;
@@ -1195,6 +1226,7 @@ async function init() {
       state.error = null;
       state.info = null;
       if (session?.user) {
+        state.authModalOpen = false;
         try {
           await loadProfile(session.user.id);
           await refreshBankData();
