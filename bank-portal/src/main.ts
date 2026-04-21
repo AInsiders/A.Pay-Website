@@ -5,10 +5,12 @@ import {
   plannerPlan,
   planNextActions,
   planProtectedAmount,
+  planSafeLiquidity,
   planSafeToSpend,
   planWarnings,
   toPlannerStateRow,
   type PlannerPlan,
+  type PlannerReserveAllocationLine,
   type PlannerStateRow,
 } from "./planner-state";
 import type { TellerEnrollmentPayload } from "./teller";
@@ -203,6 +205,10 @@ const state: {
   error: string | null;
   info: string | null;
   busy: boolean;
+  /** True while re-fetching `planner_snapshots` from Supabase (planner tab / manual reload). */
+  plannerSyncBusy: boolean;
+  /** Last Supabase error when loading planner state (non-fatal; bank/profile may still work). */
+  plannerLoadError: string | null;
   route: RouteId;
   /** Guest landing: sign-in modal visibility */
   authModalOpen: boolean;
@@ -218,6 +224,8 @@ const state: {
   error: null,
   info: null,
   busy: false,
+  plannerSyncBusy: false,
+  plannerLoadError: null,
   route: "home",
   authModalOpen: false,
   recoveryMode: false,
@@ -413,19 +421,38 @@ async function loadTransactions() {
 }
 
 async function loadPlannerSnapshot() {
+  state.plannerLoadError = null;
   if (!state.session?.user?.id) {
     state.plannerSnapshot = null;
     return;
   }
   const { data, error } = await supabase
     .from("planner_snapshots")
-    .select("*")
+    .select(
+      "id, user_id, plan, snapshot, created_at, updated_at, source_platform, source_app_version, source_updated_at, planner_schema_version, planner_engine_version",
+    )
     .eq("user_id", state.session.user.id)
     .order("updated_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (error) throw error;
+  if (error) {
+    state.plannerLoadError = error.message;
+    state.plannerSnapshot = null;
+    return;
+  }
   state.plannerSnapshot = data ?? null;
+}
+
+async function reloadPlannerFromSupabase() {
+  if (!state.session?.user?.id) return;
+  state.plannerSyncBusy = true;
+  render();
+  try {
+    await loadPlannerSnapshot();
+  } finally {
+    state.plannerSyncBusy = false;
+    render();
+  }
 }
 
 async function fetchNonce(): Promise<string> {
@@ -931,6 +958,58 @@ function renderTimelineList(
     .join("")}</div>`;
 }
 
+function renderReserveHoldList(items: PlannerReserveAllocationLine[], emptyCopy: string) {
+  if (!items.length) return `<p class="muted">${escapeHtml(emptyCopy)}</p>`;
+  return `<div class="fx-mini-list">${items
+    .map((item) => {
+      const meta = [item.dueDate, item.sourcePayDate ? `Reserve from ${item.sourcePayDate}` : ""].filter(Boolean).join(" · ");
+      return `
+        <article class="fx-mini-list__item">
+          <div>
+            <strong>${escapeHtml(item.label)}</strong>
+            <p>${escapeHtml(meta || "Held in reserve toward an obligation.")}</p>
+          </div>
+          <span>${money(item.amount)}</span>
+        </article>
+      `;
+    })
+    .join("")}</div>`;
+}
+
+function renderDebtSummaryList(plan: PlannerPlan) {
+  const rows = plan.debtSummary ?? [];
+  if (!rows.length) return `<p class="muted">No debt summary lines in this plan snapshot.</p>`;
+  return `<div class="fx-mini-list">${rows
+    .map(
+      (d) => `
+      <article class="fx-mini-list__item">
+        <div><strong>${escapeHtml(d.label)}</strong><p>Balance remaining</p></div>
+        <span>${money(d.balanceLeft)}</span>
+      </article>
+    `,
+    )
+    .join("")}</div>`;
+}
+
+function renderGoalProgressGrid(plan: PlannerPlan) {
+  const goals = plan.goalProgress ?? [];
+  if (!goals.length) return `<p class="muted">No savings or goal progress in this snapshot.</p>`;
+  return `<div class="fx-goal-grid">${goals
+    .map(
+      (g) => `
+      <article class="fx-goal-card">
+        <p class="fx-goal-card__label">${escapeHtml(g.label)}</p>
+        <p class="fx-goal-card__amt">${money(g.currentAmount)} <span class="muted">/ ${money(g.targetAmount)}</span></p>
+        <div class="fx-goal-card__bar" role="presentation" aria-hidden="true">
+          <span style="width:${Math.round(Math.min(1, Math.max(0, g.progressRatio)) * 100)}%"></span>
+        </div>
+        <p class="muted fx-goal-card__meta">${money(g.remainingAmount)} to go · ~${g.paychecksNeeded ?? "—"} paychecks</p>
+      </article>
+    `,
+    )
+    .join("")}</div>`;
+}
+
 function renderSignedInInfoPage(route: RouteId) {
   switch (route) {
     case "privacy":
@@ -1074,51 +1153,197 @@ function renderAppHome(plannerState: PlannerStateRow | null, plan: PlannerPlan |
 }
 
 function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: PlannerPlan | null) {
+  const syncDisabled = state.plannerSyncBusy || state.busy;
+  const loadErr = state.plannerLoadError
+    ? `<div class="banner banner--alert" role="alert">${escapeHtml(state.plannerLoadError)}</div>`
+    : "";
+
   if (!plan) {
     return `
-      <section class="fx-panel">
-        <p class="fx-eyebrow">Planner</p>
-        <h2>Waiting for canonical planner output</h2>
-        <p class="muted">Once BillPayer syncs a <code>PlannerPlan</code> to Supabase, this page will show the paycheck-to-paycheck timeline and current allocation guidance without recreating the engine in JavaScript.</p>
-      </section>
+      <div class="fx-stack fx-stack--planner">
+        ${loadErr}
+        <section class="fx-panel fx-panel--highlight">
+          <div class="fx-planner-head__row">
+            <div>
+              <p class="fx-eyebrow">Planner</p>
+              <h2>Connect Supabase + sync a plan row</h2>
+              <p class="muted">
+                This screen reads your latest <code>planner_snapshots</code> row for your user id (JSON <code>plan</code> column = BillPayer <code>PlannerPlan</code>).
+                Math stays on the shared engine; the web app only renders what Postgres returns.
+              </p>
+            </div>
+            <div class="fx-planner-head__actions">
+              <button type="button" class="secondary" id="btn-refresh-planner" ${syncDisabled ? "disabled" : ""}>${state.plannerSyncBusy ? "Loading…" : "Reload from Supabase"}</button>
+            </div>
+          </div>
+        </section>
+      </div>
     `;
   }
 
+  const dash = plan.dashboard;
+  const safe = planSafeToSpend(plan);
+  const protectedTotal = planProtectedAmount(plan);
+  const shortAmount = planAmountShort(plan);
+  const liquidity = planSafeLiquidity(plan);
+  const warnings = planWarnings(plan);
+  const nextActions = planNextActions(plan);
+  const nextPaycheck = plan.nextPaycheckNeed;
+  const scenarioSummaries = plan.scenarioSummaries ?? [];
+
   return `
-    <div class="fx-layout fx-layout--split">
-      <div class="fx-stack">
-        <section class="fx-panel fx-panel--highlight">
-          <p class="fx-eyebrow">Planner</p>
-          <h2>Current paycheck card</h2>
-          ${renderTimelineList(plan.currentPaycheckCard ? [plan.currentPaycheckCard] : [], "No current paycheck card yet.")}
+    <div class="fx-stack fx-stack--planner">
+      ${loadErr}
+      <section class="fx-panel fx-panel--highlight">
+        <div class="fx-planner-head__row">
+          <div>
+            <p class="fx-eyebrow">Planner · from Supabase</p>
+            <h2>Safe to spend</h2>
+            <p class="fx-app-hero__value">${money(safe)}</p>
+            <p class="muted">Row updated <strong>${escapeHtml(plannerState?.updated_at ?? "—")}</strong> · platform <strong>${escapeHtml(plannerState?.source_platform ?? "unknown")}</strong> · schema <strong>${escapeHtml(plannerState?.planner_schema_version ?? "billpayer-shared-v1")}</strong></p>
+          </div>
+          <div class="fx-planner-head__actions">
+            <button type="button" class="secondary" id="btn-refresh-planner" ${syncDisabled ? "disabled" : ""}>${state.plannerSyncBusy ? "Syncing…" : "Reload from Supabase"}</button>
+            <p class="muted">Engine recalc: <strong>${escapeHtml(plan.lastRecalculatedAt ?? plannerState?.source_updated_at ?? "—")}</strong></p>
+          </div>
+        </div>
+        <div class="fx-app-hero__meta">
+          <span>Protected: <strong>${money(protectedTotal)}</strong></span>
+          <span>Short: <strong>${money(shortAmount)}</strong></span>
+          <span>Liquidity: <strong>${money(liquidity)}</strong></span>
+          <span>Scenario: <strong>${escapeHtml(plan.selectedScenarioMode ?? "FIXED")}</strong></span>
+        </div>
+        ${scenarioSummaries.length
+          ? `<div class="fx-scenario-strip">${scenarioSummaries
+              .slice(0, 6)
+              .map(
+                (summary) =>
+                  `<span class="fx-scenario-pill${summary.feasible ? "" : " is-risk"}">${escapeHtml(summary.label)} · ${
+                    summary.feasible ? "feasible" : "tight"
+                  }</span>`,
+              )
+              .join("")}</div>`
+          : ""}
+      </section>
+
+      <div class="fx-metric-grid">
+        <section class="fx-metric-card">
+          <p class="fx-metric-card__label">Target (stay on plan)</p>
+          <strong>${money(nextPaycheck?.targetToStayOnPlan ?? 0)}</strong>
+          <p>${escapeHtml(nextPaycheck?.coverageSummary ?? "Next paycheck coverage")}</p>
         </section>
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Timeline</p>
-          <h2>Upcoming paycheck allocations</h2>
-          ${renderTimelineList(plan.timeline?.slice(0, 8) ?? [], "No timeline available yet.")}
+        <section class="fx-metric-card">
+          <p class="fx-metric-card__label">Survival floor</p>
+          <strong>${money(nextPaycheck?.minimumToSurvive ?? 0)}</strong>
+          <p>Minimum before discretionary spend.</p>
+        </section>
+        <section class="fx-metric-card">
+          <p class="fx-metric-card__label">Accelerate</p>
+          <strong>${money(nextPaycheck?.idealToAccelerate ?? 0)}</strong>
+          <p>Optional push for catch-up / debt.</p>
         </section>
       </div>
-      <div class="fx-stack">
+
+      <div class="fx-planner-obligations">
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Dashboard · overdue</p>
+          <h2>Overdue now</h2>
+          ${renderDueRecommendationList(dash?.overdueNow ?? [], "Nothing flagged overdue in this snapshot.")}
+        </section>
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Dashboard · today</p>
+          <h2>Due today</h2>
+          ${renderDueRecommendationList(dash?.dueToday ?? [], "Nothing due today in this snapshot.")}
+        </section>
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Dashboard · before next pay</p>
+          <h2>Before next paycheck</h2>
+          ${renderDueRecommendationList(dash?.dueBeforeNextPaycheck ?? [], "No items in this bucket.")}
+        </section>
+      </div>
+
+      <div class="fx-layout fx-layout--split">
+        <div class="fx-stack">
+          <section class="fx-panel">
+            <p class="fx-eyebrow">Guidance</p>
+            <h2>Warnings</h2>
+            ${renderStringList(warnings, "No planner warnings.")}
+          </section>
+          <section class="fx-panel">
+            <p class="fx-eyebrow">Guidance</p>
+            <h2>Best next moves</h2>
+            ${renderStringList(nextActions, "No suggested actions in this plan.")}
+          </section>
+          <section class="fx-panel">
+            <p class="fx-eyebrow">Reserves</p>
+            <h2>Cash held back</h2>
+            ${renderReserveHoldList(dash?.reservesHeld ?? [], "No reserve lines in this snapshot.")}
+          </section>
+        </div>
+        <div class="fx-stack">
+          <section class="fx-panel fx-panel--highlight">
+            <p class="fx-eyebrow">Paycheck window</p>
+            <h2>Current paycheck card</h2>
+            ${renderTimelineList(plan.currentPaycheckCard ? [plan.currentPaycheckCard] : [], "No current paycheck card.")}
+          </section>
+          <section class="fx-panel">
+            <p class="fx-eyebrow">Timeline</p>
+            <h2>Upcoming paychecks</h2>
+            ${renderTimelineList(plan.timeline?.slice(0, 10) ?? [], "No timeline rows yet.")}
+          </section>
+        </div>
+      </div>
+
+      <div class="fx-layout fx-layout--split">
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Pay flow</p>
+          <h2>Must pay now</h2>
+          ${renderDueRecommendationList(plan.whatMustBePaidNow ?? [], "No immediate must-pay items.")}
+        </section>
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Pay flow</p>
+          <h2>Due soon</h2>
+          ${renderDueRecommendationList(plan.dueSoon ?? [], "Nothing in the due-soon list.")}
+        </section>
+      </div>
+
+      <section class="fx-panel">
+        <p class="fx-eyebrow">Goals</p>
+        <h2>Goal progress</h2>
+        ${renderGoalProgressGrid(plan)}
+      </section>
+
+      <div class="fx-layout fx-layout--split">
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Debt</p>
+          <h2>Balances from plan</h2>
+          ${renderDebtSummaryList(plan)}
+        </section>
         <section class="fx-panel">
           <p class="fx-eyebrow">Forecast</p>
-          <h2>Catch-up + payoff signals</h2>
+          <h2>Catch-up signals</h2>
           ${renderStringList(
-            (plan.catchUpAnalytics ?? []).slice(0, 6).map((item) => `${item.label}: ${item.projectedCatchUpDate ?? "pending"}`),
-            "No catch-up analytics yet.",
+            (plan.catchUpAnalytics ?? []).slice(0, 8).map((item) => {
+              const extra = item.impactIfExtraMoneyAdded ? ` · ${item.impactIfExtraMoneyAdded}` : "";
+              return `${item.label}: ${item.projectedCatchUpDate ?? "pending"}${extra}`;
+            }),
+            "No catch-up analytics in this snapshot.",
           )}
         </section>
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Planner metadata</p>
-          <h2>Engine state</h2>
-          <div class="fx-inline-list fx-inline-list--plain">
-            <li>Last trigger: <strong>${escapeHtml(plan.lastTrigger ?? "REACTIVE")}</strong></li>
-            <li>Debt free date: <strong>${escapeHtml(plan.debtFreeDate ?? "Not reached")}</strong></li>
-            <li>Ending planning cash: <strong>${money(plan.endingPlanningCash ?? 0)}</strong></li>
-            <li>Extra payoff safe now: <strong>${money(plan.safeExtraPayoffAmount ?? 0)}</strong></li>
-          </div>
-          <p class="muted">Synced from ${escapeHtml(plannerState?.source_platform ?? "unknown")} · engine ${escapeHtml(plannerState?.planner_engine_version ?? "current")}</p>
-        </section>
       </div>
+
+      <section class="fx-panel">
+        <p class="fx-eyebrow">Engine metadata</p>
+        <h2>Planner run</h2>
+        <div class="fx-inline-list fx-inline-list--plain">
+          <li>Last trigger: <strong>${escapeHtml(plan.lastTrigger ?? "—")}</strong></li>
+          <li>Debt-free date: <strong>${escapeHtml(plan.debtFreeDate ?? "—")}</strong></li>
+          <li>Ending planning cash: <strong>${money(plan.endingPlanningCash ?? 0)}</strong></li>
+          <li>Extra payoff (safe): <strong>${money(plan.safeExtraPayoffAmount ?? 0)}</strong></li>
+          <li>Overdue remaining (live): <strong>${money(plan.liveOverdueRemainingTotal ?? 0)}</strong></li>
+          <li>Engine version: <strong>${escapeHtml(plannerState?.planner_engine_version ?? "—")}</strong></li>
+        </div>
+      </section>
     </div>
   `;
 }
@@ -1722,6 +1947,9 @@ function wireApp() {
     await supabase.auth.signOut();
     state.session = null;
     state.profile = null;
+    state.plannerSnapshot = null;
+    state.plannerLoadError = null;
+    state.plannerSyncBusy = false;
     state.accounts = [];
     state.transactions = [];
     state.busy = false;
@@ -1782,6 +2010,10 @@ function wireApp() {
     void refreshBankData();
   });
 
+  document.querySelector<HTMLButtonElement>("#btn-refresh-planner")?.addEventListener("click", () => {
+    void reloadPlannerFromSupabase();
+  });
+
   document.querySelectorAll<HTMLButtonElement>("[data-pick-account]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const id = btn.getAttribute("data-pick-account");
@@ -1834,6 +2066,8 @@ async function init() {
       } else {
         state.profile = null;
         state.plannerSnapshot = null;
+        state.plannerLoadError = null;
+        state.plannerSyncBusy = false;
         state.accounts = [];
         state.transactions = [];
       }
@@ -1844,7 +2078,12 @@ async function init() {
     render();
   }
 
-  window.addEventListener("hashchange", () => render());
+  window.addEventListener("hashchange", () => {
+    render();
+    if (state.session?.user && state.route === "planner") {
+      void reloadPlannerFromSupabase();
+    }
+  });
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape" || state.session || !state.authModalOpen) return;
