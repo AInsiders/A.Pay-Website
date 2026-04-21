@@ -3193,12 +3193,10 @@ function renderCategorizeOverlay(snap: PlannerSnapshot | null): string {
 
           <label class="field">Note (optional)<input data-categorize-note value="${escapeAttr(c.note)}" placeholder="e.g. Split between rent and utilities" /></label>
 
-          ${hasSingleCategory
-            ? `<label class="field fx-checkbox">
-                <input type="checkbox" data-categorize-learn checked />
-                <span>Always tag "${escapeHtml(displayLabel)}" this way in the future</span>
-              </label>`
-            : ""}
+          <label class="field fx-checkbox" data-categorize-learn-row ${hasSingleCategory ? "" : `style="display:none"`}>
+            <input type="checkbox" data-categorize-learn checked />
+            <span>Always tag "${escapeHtml(displayLabel)}" this way in the future</span>
+          </label>
 
           <div class="row" style="justify-content:flex-end;margin-top:12px">
             <button type="button" class="secondary" data-categorize-cancel>Cancel</button>
@@ -3879,6 +3877,14 @@ function wireCategorizeButtons() {
           <span>Tagged: <strong>${money(tagged)}</strong></span>
           <span>Remaining: <strong>${money(remaining)}</strong></span>
         `;
+      }
+      // Show the "always tag" learning row as soon as the user picks a real
+      // single category. Hides it again if they switch back to uncategorized
+      // or add a second split.
+      const learnRow = document.querySelector<HTMLElement>("[data-categorize-learn-row]");
+      if (learnRow) {
+        const singleReal = c.splits.length === 1 && c.splits[0].target !== "UNCATEGORIZED:" && c.splits[0].target !== "";
+        learnRow.style.display = singleReal ? "" : "none";
       }
     });
   });
