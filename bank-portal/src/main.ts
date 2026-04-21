@@ -1,5 +1,5 @@
 import "./styles.css";
-import { isSupabaseConfigured, resolvedSupabaseUrl, supabase } from "./supabase";
+import { invokeEdgeFunction, isSupabaseConfigured, resolvedSupabaseUrl, supabase } from "./supabase";
 import type { TellerEnrollmentPayload } from "./teller";
 
 type Profile = {
@@ -217,7 +217,7 @@ async function refreshBankData() {
   render();
   try {
     const headers = await bearerAuthHeaders();
-    const { data, error } = await supabase.functions.invoke("teller-data", {
+    const { data, error } = await invokeEdgeFunction("teller-data", {
       body: { action: "accounts" },
       headers,
     });
@@ -264,7 +264,7 @@ async function loadTransactions() {
   render();
   try {
     const headers = await bearerAuthHeaders();
-    const { data, error } = await supabase.functions.invoke("teller-data", {
+    const { data, error } = await invokeEdgeFunction("teller-data", {
       body: { action: "transactions", accountId: state.selectedAccountId },
       headers,
     });
@@ -284,7 +284,7 @@ async function loadTransactions() {
 async function fetchNonce(): Promise<string> {
   try {
     const headers = await bearerAuthHeaders();
-    const { data, error } = await supabase.functions.invoke("teller-nonce", {
+    const { data, error } = await invokeEdgeFunction("teller-nonce", {
       body: {},
       headers,
     });
@@ -349,7 +349,7 @@ async function startTellerConnect() {
         state.error = null;
         render();
         const headers = await bearerAuthHeaders();
-        const { error } = await supabase.functions.invoke("teller-enrollment-complete", {
+        const { error } = await invokeEdgeFunction("teller-enrollment-complete", {
           body: { nonce, environment: tellerEnvironment(), payload: enrollment },
           headers,
         });
