@@ -177,6 +177,7 @@ const THEME_PRESETS: { id: string; label: string; hex: string }[] = [
 const state: {
   session: Awaited<ReturnType<typeof supabase.auth.getSession>>["data"]["session"];
   profile: Profile | null;
+  plannerSnapshot: unknown | null;
   accounts: unknown[];
   transactions: unknown[];
   selectedAccountId: string | null;
@@ -191,6 +192,7 @@ const state: {
 } = {
   session: null,
   profile: null,
+  plannerSnapshot: null,
   accounts: [],
   transactions: [],
   selectedAccountId: null,
@@ -385,6 +387,22 @@ async function loadTransactions() {
     state.busy = false;
     render();
   }
+}
+
+async function loadPlannerSnapshot() {
+  if (!state.session?.user?.id) {
+    state.plannerSnapshot = null;
+    return;
+  }
+  const { data, error } = await supabase
+    .from("planner_snapshots")
+    .select("snapshot, updated_at")
+    .eq("user_id", state.session.user.id)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  state.plannerSnapshot = data ?? null;
 }
 
 async function fetchNonce(): Promise<string> {
@@ -842,6 +860,7 @@ function renderApp() {
   const profile = state.profile;
   const accent = profile?.accent_color ?? DEFAULT_ACCENT;
   const mode = profile?.theme_mode === "light" ? "light" : "dark";
+  const planner = state.plannerSnapshot as { snapshot?: unknown; updated_at?: string } | null;
   const rows = (state.accounts as Record<string, unknown>[]).map((a) => {
     const id = String(a.id ?? "");
     const sel = id === state.selectedAccountId ? "secondary" : "";
@@ -916,6 +935,19 @@ function renderApp() {
             !tellerConfigured()
               ? `<p class="error" style="margin-top:12px">Bank link needs <strong>VITE_TELLER_APP_ID</strong> in <code>bank-portal/.env</code> (restart dev or rebuild; required at build time for production).</p>`
               : ""
+          }
+        </section>
+
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Planner</p>
+          <h2>Mobile plan → web clarity</h2>
+          ${
+            planner?.snapshot
+              ? `<p class="muted">Latest planner snapshot synced from your device. Updated: <strong>${escapeHtml(String(planner.updated_at ?? "—"))}</strong>.</p>
+                 <p class="muted" style="margin:10px 0 0">
+                   Next step: we’ll port the planner math to TypeScript and render Safe-to-spend, Upcoming obligations, and Paycheck allocations here.
+                 </p>`
+              : `<p class="muted">No planner snapshot found yet. Once the mobile app uploads a snapshot to <code>planner_snapshots</code>, the website can render the same plan.</p>`
           }
         </section>
 
@@ -1404,6 +1436,7 @@ async function init() {
     if (state.session?.user) {
       try {
         await loadProfile(state.session.user.id);
+        await loadPlannerSnapshot();
         await refreshBankData();
       } catch (e) {
         state.error = e instanceof Error ? e.message : String(e);
@@ -1419,12 +1452,14 @@ async function init() {
         state.authModalOpen = false;
         try {
           await loadProfile(session.user.id);
+          await loadPlannerSnapshot();
           await refreshBankData();
         } catch (e) {
           state.error = e instanceof Error ? e.message : String(e);
         }
       } else {
         state.profile = null;
+        state.plannerSnapshot = null;
         state.accounts = [];
         state.transactions = [];
       }
