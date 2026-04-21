@@ -77,6 +77,9 @@ async function invokeEdgeFunctionViaFetch(
       signal: options?.signal ?? ctrl.signal,
     });
     const text = await res.text();
+    const reqId = res.headers.get("sb-request-id")?.trim() || res.headers.get("x-sb-request-id")?.trim();
+    const region = res.headers.get("x-sb-edge-region")?.trim();
+    const diag = [reqId ? `Request ID: ${reqId}` : "", region ? `Region: ${region}` : ""].filter(Boolean).join(" • ");
     let parsed: unknown = null;
     if (text) {
       try {
@@ -90,6 +93,10 @@ async function invokeEdgeFunctionViaFetch(
       let hint = "";
       if (res.status === 404) {
         hint = ` Function not found on this project — deploy with: supabase functions deploy ${name} --no-verify-jwt`;
+      }
+      if (res.status === 401) {
+        hint =
+          " Unauthorized. If this is called right after Teller Connect success, the most common cause is that the user session is missing/expired or the function is rejecting the payload/signature. Check Edge Function logs for details.";
       }
       const fromJson =
         parsed &&
@@ -111,14 +118,22 @@ async function invokeEdgeFunctionViaFetch(
       return {
         data: null,
         error: new Error(
-          piece ? `${piece} (HTTP ${res.status})${hint}` : `HTTP ${res.status}${hint}`,
+          piece
+            ? `${piece} (HTTP ${res.status})${hint}${diag ? `\n${diag}` : ""}`
+            : `HTTP ${res.status}${hint}${diag ? `\n${diag}` : ""}`,
         ) as never,
       };
     }
 
     return { data: parsed as never, error: null };
   } catch (e) {
-    return { data: null, error: e as never };
+    const msg = edgeInvokeErrorMessage(e);
+    return {
+      data: null,
+      error: new Error(
+        `${msg}\nRequest: ${url}\nTip: If the browser shows “CORS” but OPTIONS succeeds, check Edge Function logs for the matching time window. If there is no log line, the gateway likely blocked the request before your code ran.`,
+      ) as never,
+    };
   } finally {
     clearTimeout(tid);
   }
