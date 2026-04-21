@@ -38,8 +38,10 @@ import {
   savePlannerSettings,
   saveRecurringExpense,
   saveTransactionCategorization,
-  linkTransactionToPlannerActual,
-  deleteTransactionLinkedActuals,
+  saveTransactionSplits,
+  loadTransactionAssignments,
+  linkTransactionSplitsToPlannerActuals,
+  upsertCategoryRuleFromAdjustment,
   type PlannerActualTarget,
 } from "./planner-data";
 import {
@@ -78,33 +80,33 @@ const PLANNER_SNAPSHOT_SELECT =
 const CORE_SETUP_OPTIONS: WebSetupOption[] = [
   {
     title: "Accounts",
-    subtitle: "Cash, bank, wallet, and balances",
-    description: "Add the balances that tell the planner what money is actually available right now.",
+    subtitle: "Your cash, checking, and savings",
+    description: "What you actually have available right now.",
   },
   {
-    title: "Income",
-    subtitle: "Pay sources, schedules, and variability",
-    description: "Add each paycheck source so future cash and timing can be forecast correctly.",
+    title: "Paychecks",
+    subtitle: "When and how much you get paid",
+    description: "So A.Pay can see when new money comes in.",
   },
   {
     title: "Bills",
-    subtitle: "Hard dues, subscriptions, and due rules",
-    description: "Add real bill amounts and due timing so the planner can protect what matters first.",
+    subtitle: "What you owe and when it's due",
+    description: "So we can protect the money for each bill first.",
   },
   {
     title: "Expenses",
-    subtitle: "Essential and recurring living costs",
-    description: "Add recurring spending like groceries, gas, and other essentials.",
+    subtitle: "Recurring living costs",
+    description: "Groceries, gas, subscriptions — the everyday stuff.",
   },
   {
     title: "Debts",
-    subtitle: "Balances, due dates, and payoff behavior",
-    description: "Add debt balances and minimums so debt pressure and payoff guidance stay accurate.",
+    subtitle: "Balances and minimum payments",
+    description: "Credit cards, loans, and anything you owe over time.",
   },
   {
     title: "Housing",
-    subtitle: "Rent, arrears, and housing setup",
-    description: "Set rent or mortgage details so safe-to-spend stays realistic.",
+    subtitle: "Rent or mortgage",
+    description: "So safe-to-spend keeps this covered first.",
   },
 ];
 
@@ -189,35 +191,25 @@ type EdgeErrorContext = {
 };
 
 function formatAuthError(prefix: string, err: unknown, ctx?: EdgeErrorContext): string {
-  const host = supabaseHostHint();
+  void ctx;
   const raw = err instanceof Error ? err.message || String(err) : String(err);
 
   let detail: string;
   if (/failed to fetch/i.test(raw)) {
-    detail = `Failed to fetch. Often: network drop, CORS, wrong project URL, or ad-blocker. Confirm VITE_SUPABASE_URL points at this project (host: ${host}).`;
+    detail = "Couldn't reach the server. Check your connection and try again.";
   } else if (/failed to send a request to the edge function/i.test(raw)) {
-    detail = `Could not complete the request to Edge Functions at ${host}. Try: stable network, disable VPN/ad-block for this site, ensure the Supabase project is not paused, and do not open the app as file:// (use http://localhost:5173 for dev). Bank calls can take up to ${Math.round(TELLER_DATA_INVOKE_TIMEOUT_MS / 1000)}s — check DevTools → Network for the failing …/functions/v1/… URL and status.`;
+    detail = "Couldn't reach our server right now. Please try again in a moment.";
+  } else if (/401|unauthorized|jwt/i.test(raw)) {
+    detail = "Your sign-in expired. Please sign out and sign back in.";
+  } else if (/403|forbidden/i.test(raw)) {
+    detail = "We're not able to complete that right now. Please try again.";
+  } else if (/404/i.test(raw)) {
+    detail = "Couldn't find that on our server. Please refresh and try again.";
   } else {
     detail = raw;
   }
 
-  const lines: string[] = [`${prefix}: ${detail}`];
-  if (ctx?.edgeFunction) {
-    lines.push(`Edge function: ${ctx.edgeFunction}.`);
-  }
-
-  const combined = `${prefix} ${detail} ${raw}`;
-  if (
-    /cors|access-control|failed to send|failed to fetch|net::err_failed|401|403|unsupported jwt|verify jwt|jwt/i.test(
-      combined,
-    )
-  ) {
-    lines.push(
-      `Tip: If you use GitHub Pages or see “CORS” with no response body, the API gateway may be rejecting the session JWT before your function runs. Redeploy with --no-verify-jwt and turn off Verify JWT for Teller functions in Supabase Dashboard (ES256 tokens). See SETUP.md.`,
-    );
-  }
-
-  return lines.join("\n\n");
+  return `${prefix}: ${detail}`;
 }
 
 /** Supabase `functions.invoke` hides Edge Function JSON in `FunctionsHttpError.context` — unpack it. */
@@ -234,41 +226,23 @@ function formatEdgeFunctionJsonBody(body: Record<string, unknown>, status: numbe
   const main = e0 || m0 || u0;
   if (main) lines.push(main);
 
-  const code = typeof body.code === "string" && body.code.trim() ? body.code.trim() : "";
-  if (code && !main?.includes(code)) lines.push(`Code: ${code}`);
-
-  const details = body.details;
-  if (typeof details === "string" && details.trim()) {
-    lines.push(`Details: ${details.trim()}`);
-  } else if (details != null && typeof details === "object") {
-    lines.push(`Details: ${JSON.stringify(details).slice(0, 500)}`);
-  }
-
   const hint = typeof body.hint === "string" && body.hint.trim() ? body.hint.trim() : "";
-  if (hint) lines.push(`Hint: ${hint}`);
-
-  const sup = body.supabase;
-  if (sup && typeof sup === "object" && sup !== null) {
-    const s = sup as Record<string, unknown>;
-    if (typeof s.code === "string" && s.code.trim()) lines.push(`Supabase code: ${s.code.trim()}`);
-    if (typeof s.details === "string" && s.details.trim()) lines.push(`Supabase details: ${s.details.trim()}`);
-    if (typeof s.hint === "string" && s.hint.trim()) lines.push(`Supabase hint: ${s.hint.trim()}`);
-  }
+  if (hint && hint !== main) lines.push(hint);
 
   const head = lines.filter(Boolean).join("\n");
   if (!head) {
     if (status === 401) {
-      return `HTTP ${status} — Unauthorized. Try signing out and back in. If this persists on a hosted site, ensure Edge Functions are deployed with --no-verify-jwt (ES256 session tokens).`;
+      return "Your sign-in expired. Please sign out and sign back in.";
     }
     if (status === 404) {
-      return `HTTP ${status} — Function not found. Deploy it: supabase functions deploy <name> --no-verify-jwt`;
+      return "That resource is not available right now.";
     }
     if (status === 403) {
-      return `HTTP ${status} — Forbidden. Check gateway JWT / Verify JWT settings for this function.`;
+      return "We're not able to complete that right now.";
     }
-    return `HTTP ${status}`;
+    return "Something went wrong. Please try again.";
   }
-  return `${head}\n(HTTP ${status})`;
+  return head;
 }
 
 async function edgeFunctionMessage(err: unknown): Promise<string> {
@@ -283,7 +257,7 @@ async function edgeFunctionMessage(err: unknown): Promise<string> {
             const body = JSON.parse(text) as Record<string, unknown>;
             return formatEdgeFunctionJsonBody(body, status);
           } catch {
-            return status ? `${text.slice(0, 600)} (HTTP ${status})` : text.slice(0, 600);
+            return formatEdgeFunctionJsonBody({}, status);
           }
         }
       } catch {
@@ -344,6 +318,8 @@ const state: {
   plannerSnapshotDirty: boolean;
   plannerSnapshotSaveBusy: boolean;
   plannerSnapshotSaveError: string | null;
+  /** Summary of how each bank transaction is tagged / split, keyed by transaction id. Populated after we load transactions. */
+  txAssignments: Record<string, TransactionAssignmentSummary>;
   normalizedSnapshot: PlannerSnapshot | null;
   normalizedSnapshotBusy: boolean;
   normalizedSnapshotError: string | null;
@@ -365,7 +341,16 @@ const state: {
   /** Currently open form editor on Settings (bill/income/etc) or null. */
   settingsEditor: SettingsEditorState | null;
   /** Currently open "adjust category" dialog for a synced bank transaction. */
-  categorizeEditor: { txId: string; description: string; merchant: string | null; amount: number; postedDate: string | null } | null;
+  categorizeEditor: {
+    txId: string;
+    description: string;
+    merchant: string | null;
+    amount: number;
+    postedDate: string | null;
+    splits: CategorizeSplitRow[];
+    note: string;
+    loadingAssignments: boolean;
+  } | null;
 } = {
   session: null,
   profile: null,
@@ -374,6 +359,7 @@ const state: {
   plannerSnapshotDirty: false,
   plannerSnapshotSaveBusy: false,
   plannerSnapshotSaveError: null,
+  txAssignments: {},
   normalizedSnapshot: null,
   normalizedSnapshotBusy: false,
   normalizedSnapshotError: null,
@@ -400,6 +386,26 @@ type SettingsEditorState =
   | { kind: "goal"; id?: string }
   | { kind: "housing" }
   | { kind: "planner-settings" };
+
+/** One row inside the multi-split category editor. `target` is "KIND:id" (e.g. "BILL:uuid") or KIND alone for cash flows. */
+interface CategorizeSplitRow {
+  id: string;
+  target: string;
+  amount: number;
+  note: string;
+}
+
+/** Quick summary we display in the transactions list so the user sees at a glance how each item is categorized. */
+interface TransactionAssignmentSummary {
+  /** Primary category kind — CASH_IN, CASH_OUT, BILL, DEBT, EXPENSE, HOUSING, GOAL, UNCATEGORIZED, or SPLIT. */
+  kind: string;
+  /** Human label to show (e.g. the bill/debt/expense name). */
+  label: string;
+  /** Number of splits if the transaction was split across multiple categories. 0/1 means a single categorization. */
+  splitCount: number;
+  /** True if the user manually set this (instead of auto-categorize). */
+  isUserOverride: boolean;
+}
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
@@ -794,6 +800,7 @@ async function loadTransactions() {
     if (payload?.error) throw new Error(payload.error);
     state.transactions = payload.transactions ?? [];
     await autoCategorizeTransactionsAndReplan(state.transactions as unknown[]);
+    await refreshTxAssignmentCache();
   } catch (e) {
     state.error = formatAuthError("Transaction load", e, { edgeFunction: "teller-data" });
     state.transactions = [];
@@ -823,11 +830,109 @@ async function autoCategorizeTransactionsAndReplan(rawTransactions: unknown[]): 
     if (normalized.length === 0) return;
     const summary = await persistAutoCategorizedTransactions(userId, normalized, snapshot);
     if (summary.saved > 0) {
-      state.info = `Auto-categorized ${summary.categorized}/${summary.saved} transactions (${summary.matched} confident, ${summary.asActuals} posted as planner actuals).`;
+      const parts: string[] = [];
+      parts.push(`Added ${summary.saved} transaction${summary.saved === 1 ? "" : "s"}`);
+      if (summary.categorized > 0) parts.push(`auto-tagged ${summary.categorized}`);
+      state.info = `${parts.join(" · ")}.`;
       await loadNormalizedAndRecompute({ persist: true });
     }
   } catch (e) {
     console.warn("auto-categorize failed", e);
+  }
+}
+
+/**
+ * Fetch a compact summary of categorizations + split counts for the currently
+ * loaded transactions and store it in `state.txAssignments`. The UI reads this
+ * to show "Bill · Rent", "Split (3)", or "Tag" on each row.
+ */
+async function refreshTxAssignmentCache(): Promise<void> {
+  const userId = state.session?.user?.id;
+  if (!userId) {
+    state.txAssignments = {};
+    return;
+  }
+  const txIds = (state.transactions as Record<string, unknown>[])
+    .map((t) => String(t.id ?? ""))
+    .filter((id) => id.length > 0);
+  if (txIds.length === 0) {
+    state.txAssignments = {};
+    return;
+  }
+  try {
+    const [catRes, splitRes] = await Promise.all([
+      supabase
+        .from("transaction_categorizations")
+        .select("transaction_id, category_kind, bill_id, debt_id, expense_id, goal_id, housing_bucket_id, is_user_override")
+        .eq("user_id", userId)
+        .in("transaction_id", txIds),
+      supabase
+        .from("transaction_splits")
+        .select("transaction_id")
+        .eq("user_id", userId)
+        .in("transaction_id", txIds),
+    ]);
+
+    const splitCounts: Record<string, number> = {};
+    for (const row of splitRes.data ?? []) {
+      const key = String((row as Record<string, unknown>).transaction_id ?? "");
+      if (!key) continue;
+      splitCounts[key] = (splitCounts[key] ?? 0) + 1;
+    }
+
+    const snap = state.normalizedSnapshot;
+    const nameFor = (kind: string, id: string | null): string => {
+      if (!id) return labelForKind(kind);
+      if (!snap) return labelForKind(kind);
+      if (kind === "BILL") return snap.bills.find((b) => b.id === id)?.name ?? "Bill";
+      if (kind === "DEBT") return snap.debts.find((d) => d.id === id)?.name ?? "Debt";
+      if (kind === "EXPENSE") return snap.expenses.find((e) => e.id === id)?.name ?? "Expense";
+      if (kind === "GOAL") return snap.goals.find((g) => g.id === id)?.name ?? "Goal";
+      if (kind === "HOUSING") return snap.housingBuckets.find((h) => h.id === id)?.label ?? "Housing";
+      return labelForKind(kind);
+    };
+
+    const out: Record<string, TransactionAssignmentSummary> = {};
+    for (const row of catRes.data ?? []) {
+      const r = row as Record<string, unknown>;
+      const txId = String(r.transaction_id ?? "");
+      if (!txId) continue;
+      const rawKind = String(r.category_kind ?? "UNCATEGORIZED").toUpperCase();
+      const splitCount = splitCounts[txId] ?? 0;
+      const effectiveKind = splitCount > 1 ? "SPLIT" : rawKind;
+      const idForKind =
+        rawKind === "BILL" ? (r.bill_id as string | null)
+        : rawKind === "DEBT" ? (r.debt_id as string | null)
+        : rawKind === "EXPENSE" ? (r.expense_id as string | null)
+        : rawKind === "GOAL" ? (r.goal_id as string | null)
+        : rawKind === "HOUSING" ? (r.housing_bucket_id as string | null)
+        : null;
+      out[txId] = {
+        kind: effectiveKind,
+        label: splitCount > 1 ? `Split (${splitCount})` : nameFor(rawKind, idForKind),
+        splitCount,
+        isUserOverride: r.is_user_override === true,
+      };
+    }
+    state.txAssignments = out;
+  } catch (e) {
+    console.warn("failed to load transaction assignments", e);
+  }
+}
+
+function labelForKind(kind: string): string {
+  switch (kind.toUpperCase()) {
+    case "BILL": return "Bill";
+    case "DEBT": return "Debt";
+    case "EXPENSE": return "Expense";
+    case "GOAL": return "Goal";
+    case "HOUSING": return "Housing";
+    case "CASH_IN": return "Cash in";
+    case "CASH_OUT": return "Cash out";
+    case "INCOME": return "Income";
+    case "SPLIT": return "Split";
+    case "UNCATEGORIZED": return "Untagged";
+    default: return kind.replace(/_/g, " ").toLowerCase();
   }
 }
 
@@ -899,7 +1004,7 @@ async function loadNormalizedAndRecompute(options: { persist?: boolean } = { per
         try {
           const result = await importLegacySnapshotIntoNormalized(userId, legacy);
           if (result.importedEntities.length > 0) {
-            state.info = `Imported planner data from app: ${result.importedEntities.join(", ")}.`;
+            state.info = `Loaded your app data: ${result.importedEntities.join(", ")}.`;
             snapshot = await loadNormalizedSnapshot(userId);
           }
         } catch (e) {
@@ -990,7 +1095,7 @@ async function savePlannerSnapshotDraft() {
   state.plannerLoadError = null;
   state.plannerSnapshotDirty = false;
   syncPlannerSnapshotDraft(true);
-  state.info = "Planner inputs saved for this account. Planner output will refresh after the shared engine recalculates.";
+  state.info = "Saved.";
   render();
 }
 
@@ -1094,14 +1199,12 @@ async function startTellerConnect() {
     return;
   }
   if (!tellerConfigured()) {
-    state.error =
-      "Missing VITE_TELLER_APP_ID. Add your Teller application ID to bank-portal/.env, run npm run dev (or npm run build), and reload.";
+    state.error = "Bank linking is not available in this build yet.";
     render();
     return;
   }
   if (!window.TellerConnect?.setup) {
-    state.error =
-      "Teller Connect did not load. Check the network tab for https://cdn.teller.io/connect/connect.js (ad blockers and strict CSP can block it).";
+    state.error = "Bank linking could not load. Please check your connection and try again. Ad blockers may be blocking it.";
     render();
     return;
   }
@@ -1415,13 +1518,11 @@ function renderAuth() {
             <h2 id="auth-modal-title" class="fx-auth-modal__title">Access A.Pay</h2>
             <button type="button" class="fx-auth-modal__close" id="auth-modal-close" aria-label="Close">×</button>
           </div>
-          <p class="fx-auth-modal__lede">Secure sign-in. Your forecast and bank link sync to your profile.</p>
+          <p class="fx-auth-modal__lede">Secure sign-in. Your bills, paychecks, and bank link sync to your account.</p>
           ${
             !isSupabaseConfigured
               ? `<div class="banner" style="margin:10px 0 12px">
-                  <strong>Supabase isn’t connected yet.</strong><br />
-                  Add <code>bank-portal/.env</code> (local) or GitHub Actions secrets (deploy) for
-                  <strong>VITE_SUPABASE_URL</strong> and <strong>VITE_SUPABASE_ANON_KEY</strong>.
+                  <strong>Preview mode.</strong> Sign-in will come online once this build is fully configured.
                 </div>`
               : ""
           }
@@ -1429,16 +1530,13 @@ function renderAuth() {
             <label class="field">Email<input name="email" type="email" autocomplete="email" required placeholder="you@email.com" /></label>
             <label class="field">Password<input name="password" type="password" autocomplete="current-password" required placeholder="••••••••" /></label>
             <div class="row row--stretch">
-              <button type="submit" class="fx-btn-block" ${disabled ? "disabled" : ""}>Enter A.Pay</button>
+              <button type="submit" class="fx-btn-block" ${disabled ? "disabled" : ""}>Sign in</button>
               <button type="button" class="secondary fx-btn-block" id="btn-signup" ${disabled ? "disabled" : ""}>Create account</button>
             </div>
             <div class="row row--stretch">
               <button type="button" class="secondary fx-btn-block" id="btn-magiclink" ${disabled ? "disabled" : ""}>Email me a magic link</button>
               <button type="button" class="secondary fx-btn-block" id="btn-forgot" ${disabled ? "disabled" : ""}>Forgot password</button>
             </div>
-            <p class="muted" style="margin:6px 0 0">
-              Supabase: <strong>${escapeHtml(isSupabaseConfigured ? supabaseHost : "Not configured (preview mode)")}</strong>
-            </p>
             ${state.info ? `<p class="success">${escapeHtml(state.info)}</p>` : ""}
             ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
           </form>
@@ -1689,16 +1787,15 @@ function renderSetupStarter(
       </section>
       <div class="fx-layout fx-layout--split">
         <section class="fx-panel">
-          <p class="fx-eyebrow">Add first</p>
-          <h2>Planner inputs</h2>
-          ${renderSetupOptionList(CORE_SETUP_OPTIONS, "No setup items yet.")}
-          <p class="muted" style="margin-top:12px">Open <a href="#/settings">Settings</a> for the full checklist, or use the Android app to enter the data today.</p>
+          <p class="fx-eyebrow">Start with</p>
+          <h2>The basics</h2>
+          ${renderSetupOptionList(CORE_SETUP_OPTIONS, "Nothing to add yet.")}
+          <p class="muted" style="margin-top:12px">Open <a href="#/settings">Settings</a> to add them all in one place.</p>
         </section>
         <section class="fx-panel">
           <p class="fx-eyebrow">Then</p>
           <h2>${escapeHtml(secondaryTitle)}</h2>
           <p class="muted">${escapeHtml(secondaryBody)}</p>
-          <p class="muted">After the same account has planner data, this web app can render the same safe-to-spend and timeline automatically.</p>
         </section>
       </div>
     </div>
@@ -1733,8 +1830,8 @@ function renderSignedInInfoPage(route: RouteId) {
       return `
         <section class="fx-panel">
           <p class="fx-eyebrow">About</p>
-          <h2>One planner, many platforms</h2>
-          <p class="muted">The canonical planning engine lives in BillPayer shared Kotlin code. This website renders the same plan through Supabase-backed state.</p>
+          <h2>One plan, everywhere you go</h2>
+          <p class="muted">A.Pay is an automatic bill planner and paycheck guide. It connects your income to your bills, shows exactly what is safe to spend, and stays in sync across every device you sign in on.</p>
         </section>
       `;
     case "contact":
@@ -1742,7 +1839,7 @@ function renderSignedInInfoPage(route: RouteId) {
         <section class="fx-panel">
           <p class="fx-eyebrow">Contact</p>
           <h2>Support</h2>
-          <p class="muted">Wire this to email or a helpdesk when you are ready for production support.</p>
+          <p class="muted">Reach out to the A.Pay team if you hit a problem or want to suggest an improvement.</p>
         </section>
       `;
     default:
@@ -1751,22 +1848,23 @@ function renderSignedInInfoPage(route: RouteId) {
 }
 
 function renderAppHome(plannerState: PlannerStateRow | null, plan: PlannerPlan | null) {
+  void plannerState;
   const snap = state.normalizedSnapshot;
   if (!plan) {
     const quickAdd = `
       <section class="fx-panel fx-panel--highlight">
         <p class="fx-eyebrow">Start here</p>
         <h2>Add your money setup</h2>
-        <p class="muted">The planner needs these to show a real safe-to-spend amount. You can also edit them from Settings or the Android app.</p>
+        <p class="muted">Tell A.Pay about your paychecks, bills, and housing. That is all it needs to show a real safe-to-spend amount.</p>
         <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:10px">
-          <button type="button" data-settings-add="income">Add income source</button>
+          <button type="button" data-settings-add="income">Add paycheck</button>
           <button type="button" data-settings-add="bill">Add bill</button>
           <button type="button" data-settings-add="debt" class="secondary">Add debt</button>
           <button type="button" data-settings-add="expense" class="secondary">Add expense</button>
           <button type="button" data-settings-add="goal" class="secondary">Add goal</button>
           <button type="button" data-settings-add="housing" class="secondary">Set housing</button>
         </div>
-        ${snap ? `<p class="muted" style="margin-top:12px">Currently on file: ${snap.incomeSources.length} income · ${snap.bills.length} bills · ${snap.debts.length} debts · ${snap.expenses.length} expenses · ${snap.goals.length} goals${snap.housingConfig ? " · housing set" : ""}.</p>` : ""}
+        ${snap ? `<p class="muted" style="margin-top:12px">Currently on file: ${snap.incomeSources.length} paychecks · ${snap.bills.length} bills · ${snap.debts.length} debts · ${snap.expenses.length} expenses · ${snap.goals.length} goals${snap.housingConfig ? " · housing set" : ""}.</p>` : ""}
       </section>
     `;
     return `
@@ -1774,10 +1872,10 @@ function renderAppHome(plannerState: PlannerStateRow | null, plan: PlannerPlan |
         ${quickAdd}
         ${renderSetupStarter(
           "Home",
-          "You have not added enough information yet",
-          "A.Pay needs your core money setup before it can show a real safe-to-spend amount here.",
-          "Sync the planner",
-          "Once those inputs exist on the same signed-in account, the latest planner snapshot will appear here automatically.",
+          "Not quite enough information yet",
+          "A.Pay needs at least a paycheck, a couple of bills, and your housing to build a real plan.",
+          "What happens next",
+          "As soon as that is in place, this page will show your safe-to-spend amount, what is due soon, and what is handled.",
         )}
       </div>
     `;
@@ -1797,12 +1895,11 @@ function renderAppHome(plannerState: PlannerStateRow | null, plan: PlannerPlan |
         <p class="fx-eyebrow">Home</p>
         <h1>Safe to spend</h1>
         <p class="fx-app-hero__value">${money(safe)}</p>
-        <p class="muted">Deterministic result from the BillPayer shared planner, synced through Supabase.</p>
+        <p class="muted">What is free to use right now after bills, essentials, and reserves are protected.</p>
       </div>
       <div class="fx-app-hero__meta">
         <span>Protected: <strong>${money(protectedTotal)}</strong></span>
         <span>Short: <strong>${money(shortAmount)}</strong></span>
-        <span>Mode: <strong>${escapeHtml(plan.selectedScenarioMode ?? "FIXED")}</strong></span>
       </div>
       ${scenarioSummaries.length
         ? `<div class="fx-scenario-strip">${scenarioSummaries
@@ -1861,16 +1958,11 @@ function renderAppHome(plannerState: PlannerStateRow | null, plan: PlannerPlan |
       </div>
     </div>
 
-    <section class="fx-panel">
-      <p class="fx-eyebrow">Planner source</p>
-      <h2>Synced state</h2>
-      <p class="muted">Updated <strong>${escapeHtml(plannerState?.updated_at ?? "—")}</strong> from <strong>${escapeHtml(plannerState?.source_platform ?? "unknown")}</strong> using schema <strong>${escapeHtml(plannerState?.planner_schema_version ?? "billpayer-shared-v1")}</strong>.</p>
-    </section>
   `;
 }
 
 function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: PlannerPlan | null) {
-  const syncDisabled = state.plannerSyncBusy || state.busy;
+  void plannerState;
   const loadErr = state.plannerLoadError
     ? `<div class="banner banner--alert" role="alert">${escapeHtml(state.plannerLoadError)}</div>`
     : "";
@@ -1879,23 +1971,24 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
     const snap = state.normalizedSnapshot;
     const hasAny = snap && (snap.bills.length + snap.incomeSources.length + snap.debts.length + snap.expenses.length + snap.goals.length) > 0;
     return `
-      <div class="fx-stack fx-stack--planner">
+      <div class="fx-planner">
         ${loadErr}
-        <section class="fx-panel fx-panel--highlight">
-          <p class="fx-eyebrow">Planner</p>
-          <h2>${hasAny ? "Press recompute to generate a plan" : "You have not added enough information yet"}</h2>
-          <p class="muted">${hasAny
-            ? "You have planner inputs on file. Recompute builds timeline, safe-to-spend, and due lists from them."
-            : "Add at least one income source, some bills, and your housing info so the planner can forecast."}</p>
-          <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:10px">
-            <button type="button" id="btn-recompute-plan" ${state.normalizedSnapshotBusy ? "disabled" : ""}>${state.normalizedSnapshotBusy ? "Recomputing…" : "Recompute plan"}</button>
-            <button type="button" class="secondary" id="btn-refresh-planner" ${syncDisabled ? "disabled" : ""}>${state.plannerSyncBusy ? "Loading…" : "Reload from Supabase"}</button>
-            <button type="button" data-settings-add="income" class="secondary">Add income source</button>
+        <section class="fx-paynow-hero">
+          <div class="fx-paynow-hero__left">
+            <p class="fx-eyebrow">Planner</p>
+            <h1>${hasAny ? "Ready to build your plan" : "Let's set up your plan"}</h1>
+            <p class="muted">${hasAny
+              ? "Your setup is saved. Press the button to build your paycheck-to-paycheck plan."
+              : "Add at least one paycheck, a few bills, and your housing so we can map every paycheck to what it must cover."}</p>
+          </div>
+          <div class="fx-paynow-hero__right">
+            <button type="button" id="btn-recompute-plan" ${state.normalizedSnapshotBusy ? "disabled" : ""}>${state.normalizedSnapshotBusy ? "Building…" : "Build my plan"}</button>
+            <button type="button" data-settings-add="income" class="secondary">Add paycheck</button>
             <button type="button" data-settings-add="bill" class="secondary">Add bill</button>
             <button type="button" data-settings-add="housing" class="secondary">Set housing</button>
           </div>
-          ${state.normalizedSnapshotError ? `<p class="error">${escapeHtml(state.normalizedSnapshotError)}</p>` : ""}
         </section>
+        ${state.normalizedSnapshotError ? `<p class="error">${escapeHtml(state.normalizedSnapshotError)}</p>` : ""}
       </div>
     `;
   }
@@ -1904,167 +1997,315 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
   const safe = planSafeToSpend(plan);
   const protectedTotal = planProtectedAmount(plan);
   const shortAmount = planAmountShort(plan);
-  const liquidity = planSafeLiquidity(plan);
-  const warnings = planWarnings(plan);
-  const nextActions = planNextActions(plan);
+  const overdueList = dash?.overdueNow ?? [];
+  const dueTodayList = dash?.dueToday ?? [];
   const nextPaycheck = plan.nextPaycheckNeed;
-  const scenarioSummaries = plan.scenarioSummaries ?? [];
+  const paychecks = (plan.timeline ?? []).slice(0, 6);
 
   return `
-    <div class="fx-stack fx-stack--planner">
+    <div class="fx-planner">
       ${loadErr}
-      <section class="fx-panel fx-panel--highlight">
-        <div class="fx-planner-head__row">
+
+      <section class="fx-paynow-hero">
+        <div class="fx-paynow-hero__left">
+          <p class="fx-eyebrow">Safe to spend · right now</p>
+          <h1 class="fx-paynow-hero__value ${safe > 0 ? "" : "is-zero"}">${money(safe)}</h1>
+          <p class="muted">After covering essentials, protected bills, debt minimums, and housing.</p>
+        </div>
+        <div class="fx-paynow-hero__stats">
+          <div class="fx-paynow-stat"><span>Protected</span><strong>${money(protectedTotal)}</strong></div>
+          <div class="fx-paynow-stat ${shortAmount > 0 ? "is-risk" : ""}"><span>Short</span><strong>${money(shortAmount)}</strong></div>
+          <div class="fx-paynow-stat">
+            <span>Next paycheck</span>
+            <strong>${escapeHtml(nextPaycheck?.nextExpectedDate ?? "—")}</strong>
+          </div>
+        </div>
+        <div class="fx-paynow-hero__actions">
+          <button type="button" id="btn-recompute-plan" ${state.normalizedSnapshotBusy ? "disabled" : ""}>${state.normalizedSnapshotBusy ? "Updating…" : "Refresh plan"}</button>
+        </div>
+      </section>
+
+      ${overdueList.length > 0 || dueTodayList.length > 0
+        ? `<section class="fx-alert-rail">
+            ${overdueList.length > 0
+              ? `<article class="fx-alert fx-alert--critical">
+                  <p class="fx-eyebrow">Overdue · pay first</p>
+                  ${renderPlanLineList(overdueList)}
+                </article>` : ""}
+            ${dueTodayList.length > 0
+              ? `<article class="fx-alert">
+                  <p class="fx-eyebrow">Due today</p>
+                  ${renderPlanLineList(dueTodayList)}
+                </article>` : ""}
+          </section>`
+        : ""}
+
+      ${renderWhatToDoWithLeftover(plan, safe, shortAmount)}
+
+      <section class="fx-paycheck-stack">
+        <header class="fx-paycheck-stack__head">
           <div>
-            <p class="fx-eyebrow">Planner · from Supabase</p>
-            <h2>Safe to spend</h2>
-            <p class="fx-app-hero__value">${money(safe)}</p>
-            <p class="muted">Row updated <strong>${escapeHtml(plannerState?.updated_at ?? "—")}</strong> · platform <strong>${escapeHtml(plannerState?.source_platform ?? "unknown")}</strong> · schema <strong>${escapeHtml(plannerState?.planner_schema_version ?? "billpayer-shared-v1")}</strong></p>
+            <p class="fx-eyebrow">Paycheck-to-paycheck</p>
+            <h2>Each paycheck — what it covers</h2>
           </div>
-          <div class="fx-planner-head__actions">
-            <button type="button" id="btn-recompute-plan" ${state.normalizedSnapshotBusy ? "disabled" : ""}>${state.normalizedSnapshotBusy ? "Recomputing…" : "Recompute plan"}</button>
-            <button type="button" class="secondary" id="btn-refresh-planner" ${syncDisabled ? "disabled" : ""}>${state.plannerSyncBusy ? "Syncing…" : "Reload from Supabase"}</button>
-            <p class="muted">Engine recalc: <strong>${escapeHtml(plan.lastRecalculatedAt ?? plannerState?.source_updated_at ?? "—")}</strong></p>
-          </div>
-        </div>
-        <div class="fx-app-hero__meta">
-          <span>Protected: <strong>${money(protectedTotal)}</strong></span>
-          <span>Short: <strong>${money(shortAmount)}</strong></span>
-          <span>Liquidity: <strong>${money(liquidity)}</strong></span>
-          <span>Scenario: <strong>${escapeHtml(plan.selectedScenarioMode ?? "FIXED")}</strong></span>
-        </div>
-        ${scenarioSummaries.length
-          ? `<div class="fx-scenario-strip">${scenarioSummaries
-              .slice(0, 6)
-              .map(
-                (summary) =>
-                  `<span class="fx-scenario-pill${summary.feasible ? "" : " is-risk"}">${escapeHtml(summary.label)} · ${
-                    summary.feasible ? "feasible" : "tight"
-                  }</span>`,
-              )
-              .join("")}</div>`
-          : ""}
+          <p class="muted">Auto-allocated using your bills, expenses, debts, and housing.</p>
+        </header>
+        ${paychecks.length > 0
+          ? `<div class="fx-paycheck-rail">${paychecks.map(renderPaycheckCard).join("")}</div>`
+          : `<p class="muted">No upcoming paychecks yet. Add a paycheck in Settings.</p>`}
       </section>
 
-      <div class="fx-metric-grid">
-        <section class="fx-metric-card">
-          <p class="fx-metric-card__label">Target (stay on plan)</p>
-          <strong>${money(nextPaycheck?.targetToStayOnPlan ?? 0)}</strong>
-          <p>${escapeHtml(nextPaycheck?.coverageSummary ?? "Next paycheck coverage")}</p>
-        </section>
-        <section class="fx-metric-card">
-          <p class="fx-metric-card__label">Survival floor</p>
-          <strong>${money(nextPaycheck?.minimumToSurvive ?? 0)}</strong>
-          <p>Minimum before discretionary spend.</p>
-        </section>
-        <section class="fx-metric-card">
-          <p class="fx-metric-card__label">Accelerate</p>
-          <strong>${money(nextPaycheck?.idealToAccelerate ?? 0)}</strong>
-          <p>Optional push for catch-up / debt.</p>
-        </section>
-      </div>
-
-      <div class="fx-planner-obligations">
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Dashboard · overdue</p>
-          <h2>Overdue now</h2>
-          ${renderDueRecommendationList(dash?.overdueNow ?? [], "Nothing flagged overdue in this snapshot.")}
-        </section>
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Dashboard · today</p>
-          <h2>Due today</h2>
-          ${renderDueRecommendationList(dash?.dueToday ?? [], "Nothing due today in this snapshot.")}
-        </section>
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Dashboard · before next pay</p>
-          <h2>Before next paycheck</h2>
-          ${renderDueRecommendationList(dash?.dueBeforeNextPaycheck ?? [], "No items in this bucket.")}
-        </section>
-      </div>
-
-      <div class="fx-layout fx-layout--split">
-        <div class="fx-stack">
-          <section class="fx-panel">
-            <p class="fx-eyebrow">Guidance</p>
-            <h2>Warnings</h2>
-            ${renderStringList(warnings, "No planner warnings.")}
-          </section>
-          <section class="fx-panel">
-            <p class="fx-eyebrow">Guidance</p>
-            <h2>Best next moves</h2>
-            ${renderStringList(nextActions, "No suggested actions in this plan.")}
-          </section>
-          <section class="fx-panel">
-            <p class="fx-eyebrow">Reserves</p>
-            <h2>Cash held back</h2>
-            ${renderReserveHoldList(dash?.reservesHeld ?? [], "No reserve lines in this snapshot.")}
-          </section>
-        </div>
-        <div class="fx-stack">
-          <section class="fx-panel fx-panel--highlight">
-            <p class="fx-eyebrow">Paycheck window</p>
-            <h2>Current paycheck card</h2>
-            ${renderTimelineList(plan.currentPaycheckCard ? [plan.currentPaycheckCard] : [], "No current paycheck card.")}
-          </section>
-          <section class="fx-panel">
-            <p class="fx-eyebrow">Timeline</p>
-            <h2>Upcoming paychecks</h2>
-            ${renderTimelineList(plan.timeline?.slice(0, 10) ?? [], "No timeline rows yet.")}
-          </section>
-        </div>
-      </div>
-
-      <div class="fx-layout fx-layout--split">
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Pay flow</p>
-          <h2>Must pay now</h2>
-          ${renderDueRecommendationList(plan.whatMustBePaidNow ?? [], "No immediate must-pay items.")}
-        </section>
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Pay flow</p>
-          <h2>Due soon</h2>
-          ${renderDueRecommendationList(plan.dueSoon ?? [], "Nothing in the due-soon list.")}
-        </section>
-      </div>
-
-      <section class="fx-panel">
-        <p class="fx-eyebrow">Goals</p>
-        <h2>Goal progress</h2>
-        ${renderGoalProgressGrid(plan)}
-      </section>
-
-      <div class="fx-layout fx-layout--split">
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Debt</p>
-          <h2>Balances from plan</h2>
-          ${renderDebtSummaryList(plan)}
-        </section>
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Forecast</p>
-          <h2>Catch-up signals</h2>
-          ${renderStringList(
-            (plan.catchUpAnalytics ?? []).slice(0, 8).map((item) => {
-              const extra = item.impactIfExtraMoneyAdded ? ` · ${item.impactIfExtraMoneyAdded}` : "";
-              return `${item.label}: ${item.projectedCatchUpDate ?? "pending"}${extra}`;
-            }),
-            "No catch-up analytics in this snapshot.",
-          )}
-        </section>
-      </div>
-
-      <section class="fx-panel">
-        <p class="fx-eyebrow">Engine metadata</p>
-        <h2>Planner run</h2>
-        <div class="fx-inline-list fx-inline-list--plain">
-          <li>Last trigger: <strong>${escapeHtml(plan.lastTrigger ?? "—")}</strong></li>
-          <li>Debt-free date: <strong>${escapeHtml(plan.debtFreeDate ?? "—")}</strong></li>
-          <li>Ending planning cash: <strong>${money(plan.endingPlanningCash ?? 0)}</strong></li>
-          <li>Extra payoff (safe): <strong>${money(plan.safeExtraPayoffAmount ?? 0)}</strong></li>
-          <li>Overdue remaining (live): <strong>${money(plan.liveOverdueRemainingTotal ?? 0)}</strong></li>
-          <li>Engine version: <strong>${escapeHtml(plannerState?.planner_engine_version ?? "—")}</strong></li>
-        </div>
-      </section>
     </div>
+  `;
+}
+
+/**
+ * "What to do with what's left" — when safe-to-spend > 0, show concrete,
+ * tappable next moves (extra debt payoff, top off goals, save safety buffer,
+ * spend freely). When the user is short, show how to recover. Keeps the planner
+ * focused on actions, not raw numbers.
+ */
+function renderWhatToDoWithLeftover(plan: PlannerPlan, safe: number, shortAmount: number): string {
+  const snap = state.normalizedSnapshot;
+  if (shortAmount > 0) {
+    const missing = Math.max(0, shortAmount);
+    const tips: string[] = [];
+    if ((plan.whatCanBeDelayed ?? []).length > 0) {
+      tips.push(`Consider delaying ${plan.whatCanBeDelayed![0].label} by a cycle — frees up ${money(plan.whatCanBeDelayed![0].amount)}.`);
+    }
+    if ((plan.nextPaycheckNeed?.targetToStayOnPlan ?? 0) > 0) {
+      tips.push(`Next paycheck needs ${money(plan.nextPaycheckNeed!.targetToStayOnPlan!)} to stay on plan.`);
+    }
+    tips.push(`Cut or push back ${money(missing)} of non-essential spending to get current.`);
+    return `
+      <section class="fx-doplan fx-doplan--short">
+        <div class="fx-doplan__head">
+          <p class="fx-eyebrow">Action plan</p>
+          <h2>Short by ${money(missing)} through your planning window</h2>
+          <p class="muted">Here's the fastest path back to a safe plan.</p>
+        </div>
+        <ul class="fx-doplan__list">
+          ${tips.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}
+        </ul>
+      </section>
+    `;
+  }
+  if (safe <= 0) {
+    return `
+      <section class="fx-doplan">
+        <div class="fx-doplan__head">
+          <p class="fx-eyebrow">Action plan</p>
+          <h2>Plan is balanced — $0 free to move</h2>
+          <p class="muted">Everything is protected. No money to redirect right now; check back after the next paycheck.</p>
+        </div>
+      </section>
+    `;
+  }
+  const actions: { icon: string; title: string; amount: string; detail: string; cta?: string; ctaKind?: string }[] = [];
+  // 1. Top-of-mind: debt payoff if there is any
+  const debts = (snap?.debts ?? []).filter((d) => (d.currentBalance ?? 0) > 0).slice(0, 2);
+  debts.forEach((d) => {
+    const suggest = Math.min(safe, Math.max(d.minimumDue ?? 0, Math.round((d.currentBalance ?? 0) * 0.05)));
+    if (suggest <= 0) return;
+    actions.push({
+      icon: "💳",
+      title: `Pay extra on ${d.name}`,
+      amount: money(suggest),
+      detail: `${money(d.currentBalance)} balance · min ${money(d.minimumDue)} each cycle. Extra goes straight to principal.`,
+      cta: "Edit debt",
+      ctaKind: "debt",
+    });
+  });
+  // 2. Top off goals that are funded from "truly free" cash
+  const activeGoals = (snap?.goals ?? []).filter((g) => g.isActive !== false && (g.targetAmount ?? 0) > (g.currentAmount ?? 0)).slice(0, 2);
+  activeGoals.forEach((g) => {
+    const remaining = Math.max(0, (g.targetAmount ?? 0) - (g.currentAmount ?? 0));
+    const suggest = Math.min(safe, remaining, Math.max(25, Math.round(safe * 0.15)));
+    if (suggest <= 0) return;
+    actions.push({
+      icon: "🎯",
+      title: `Put into ${g.name}`,
+      amount: money(suggest),
+      detail: `${money(g.currentAmount)} / ${money(g.targetAmount)} · ${money(remaining)} to finish.`,
+      cta: "Edit goal",
+      ctaKind: "goal",
+    });
+  });
+  // 3. Safety buffer (always)
+  if (safe >= 50) {
+    actions.push({
+      icon: "🛟",
+      title: "Add to your safety buffer",
+      amount: money(Math.min(safe, Math.max(100, Math.round(safe * 0.1)))),
+      detail: "Protects against unexpected bills and keeps next month's plan stable.",
+      cta: "Edit preferences",
+      ctaKind: "planner-settings",
+    });
+  }
+  // 4. Free spend (always)
+  actions.push({
+    icon: "🟢",
+    title: "Spend freely",
+    amount: money(safe),
+    detail: "This amount is not protecting any bill, debt, or essential. It's yours to spend.",
+  });
+  return `
+    <section class="fx-doplan">
+      <div class="fx-doplan__head">
+        <p class="fx-eyebrow">What to do with ${money(safe)} free</p>
+        <h2>Smart moves with your leftover</h2>
+        <p class="muted">These are safe because every bill, housing payment, and debt minimum is already protected.</p>
+      </div>
+      <div class="fx-doplan__grid">
+        ${actions.map((a) => `
+          <article class="fx-doplan__card">
+            <div class="fx-doplan__card-head">
+              <span class="fx-doplan__icon" aria-hidden="true">${a.icon}</span>
+              <div>
+                <strong>${escapeHtml(a.title)}</strong>
+                <p class="fx-doplan__amt">${escapeHtml(a.amount)}</p>
+              </div>
+            </div>
+            <p class="muted">${escapeHtml(a.detail)}</p>
+            ${a.cta && a.ctaKind ? `<button type="button" class="secondary" data-settings-add="${escapeAttr(a.ctaKind)}">${escapeHtml(a.cta)}</button>` : ""}
+          </article>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderPlanLineList(items: { label: string; amount: number; dueDate?: string; rationale?: string }[]): string {
+  if (!items.length) return `<p class="muted" style="margin:0">Nothing here.</p>`;
+  return `<ul class="fx-pay-line-list">${items.slice(0, 6).map((it) => `
+    <li class="fx-pay-line">
+      <div class="fx-pay-line__main">
+        <strong>${escapeHtml(it.label)}</strong>
+        <span class="muted">${escapeHtml(it.rationale ?? it.dueDate ?? "")}</span>
+      </div>
+      <strong class="fx-pay-line__amt">${money(it.amount)}</strong>
+    </li>
+  `).join("")}</ul>`;
+}
+
+function paycheckDateLabel(iso?: string): string {
+  if (!iso) return "";
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!m) return iso;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
+function bucketLabel(bucket?: string): string {
+  switch ((bucket ?? "").toUpperCase()) {
+    case "DEDUCTION": return "Deductions";
+    case "ESSENTIALS": return "Essentials";
+    case "BILL": return "Bills";
+    case "DEBT_MINIMUM": return "Debt minimums";
+    case "HOUSING_CURRENT": return "Housing";
+    case "HOUSING_ARREARS": return "Past-due housing";
+    case "BORROW_REPAYMENT": return "Borrow repayment";
+    case "RESERVE": return "Reserves";
+    case "EXTRA_PAYOFF": return "Extra payoff";
+    case "GOAL": return "Goals";
+    case "SAVINGS_BUFFER": return "Safety buffer";
+    default: return "Other";
+  }
+}
+
+function renderPaycheckCard(p: import("./planner-state").PlannerTimelinePaycheckPlan): string {
+  const allocations = p.allocations ?? [];
+  const grouped = new Map<string, { total: number; lines: { label: string; amount: number }[] }>();
+  for (const a of allocations) {
+    const key = (a.bucket ?? "OTHER").toUpperCase();
+    const amount = a.amount ?? 0;
+    const entry = grouped.get(key) ?? { total: 0, lines: [] };
+    entry.total += amount;
+    entry.lines.push({ label: a.label, amount });
+    grouped.set(key, entry);
+  }
+  const bucketOrder = [
+    "DEDUCTION",
+    "ESSENTIALS",
+    "HOUSING_CURRENT",
+    "HOUSING_ARREARS",
+    "BILL",
+    "DEBT_MINIMUM",
+    "BORROW_REPAYMENT",
+    "RESERVE",
+    "EXTRA_PAYOFF",
+    "GOAL",
+    "SAVINGS_BUFFER",
+    "OTHER",
+  ];
+  const bucketsHtml = bucketOrder
+    .filter((k) => grouped.has(k))
+    .map((k) => {
+      const g = grouped.get(k)!;
+      return `
+        <div class="fx-pay-bucket">
+          <div class="fx-pay-bucket__head">
+            <span class="fx-pay-bucket__label">${escapeHtml(bucketLabel(k))}</span>
+            <strong class="fx-pay-bucket__total">${money(-g.total)}</strong>
+          </div>
+          <ul class="fx-pay-bucket__lines">
+            ${g.lines
+              .sort((a, b) => b.amount - a.amount)
+              .map((l) => `<li><span>${escapeHtml(l.label)}</span><span>${money(-l.amount)}</span></li>`)
+              .join("")}
+          </ul>
+        </div>
+      `;
+    })
+    .join("");
+  const reserves = p.reserveNowList ?? [];
+  const reservesHtml = reserves.length > 0 ? `
+    <div class="fx-pay-bucket fx-pay-bucket--reserve">
+      <div class="fx-pay-bucket__head">
+        <span class="fx-pay-bucket__label">Reserved for later</span>
+        <strong class="fx-pay-bucket__total">${money(reserves.reduce((s, r) => s + r.amount, 0))}</strong>
+      </div>
+      <ul class="fx-pay-bucket__lines">
+        ${reserves.slice(0, 4).map((r) => `<li><span>${escapeHtml(r.label)}</span><span>${money(r.amount)}</span></li>`).join("")}
+      </ul>
+    </div>
+  ` : "";
+  const deductionAmount = p.deductionAmount ?? 0;
+  const showDeductionLine = deductionAmount > 0 && !grouped.has("DEDUCTION");
+  const deductionHtml = showDeductionLine ? `
+    <div class="fx-pay-bucket">
+      <div class="fx-pay-bucket__head">
+        <span class="fx-pay-bucket__label">Deductions</span>
+        <strong class="fx-pay-bucket__total">${money(-deductionAmount)}</strong>
+      </div>
+    </div>
+  ` : "";
+  const usable = p.usableAmount ?? 0;
+  const left = p.amountLeftAfterAllocations ?? 0;
+  const leftClass = left >= 0 ? "fx-pay-foot__amt" : "fx-pay-foot__amt is-risk";
+  return `
+    <article class="fx-paycheck">
+      <header class="fx-paycheck__head">
+        <div>
+          <span class="fx-paycheck__date">${escapeHtml(paycheckDateLabel(p.date) || p.date || "")}</span>
+          <strong class="fx-paycheck__label">${escapeHtml(p.payerLabel ?? "Paycheck")}</strong>
+        </div>
+        <div class="fx-paycheck__in">
+          <span class="muted">Usable pay</span>
+          <strong>+${money(usable)}</strong>
+        </div>
+      </header>
+      <div class="fx-pay-body">
+        ${deductionHtml}
+        ${bucketsHtml || `<p class="muted">Nothing to pay from this paycheck — all allocations cleared.</p>`}
+        ${reservesHtml}
+      </div>
+      <footer class="fx-paycheck__foot">
+        <span class="muted">Left over</span>
+        <strong class="${leftClass}">${money(left)}</strong>
+      </footer>
+    </article>
   `;
 }
 
@@ -2155,15 +2396,15 @@ function renderAccountsWorkspace(
   return `
     <section class="fx-panel">
       <p class="fx-eyebrow">Accounts</p>
-      <h2>Accounts and bank connections</h2>
-      <p class="muted">Connect a bank here to pull live balances and transactions, then use Settings to finish the rest of your planner setup.</p>
+      <h2>Your accounts &amp; bank</h2>
+      <p class="muted">Connect a bank so A.Pay pulls your real balances and transactions automatically.</p>
       <div class="row">
         <button type="button" id="btn-teller" ${busy ? "disabled" : ""}>Connect my bank</button>
-        <button type="button" class="secondary" id="btn-refresh" ${busy ? "disabled" : ""}>Refresh data</button>
+        <button type="button" class="secondary" id="btn-refresh" ${busy ? "disabled" : ""}>Refresh</button>
       </div>
       ${
         !tellerReady
-          ? `<p class="error" style="margin-top:12px">Bank link needs <strong>VITE_TELLER_APP_ID</strong> in <code>bank-portal/.env</code> (restart dev or rebuild; required at build time for production).</p>`
+          ? `<p class="muted" style="margin-top:12px">Bank linking is unavailable in this preview build.</p>`
           : ""
       }
       ${stateError && rows.length === 0 ? `<p class="error" style="margin-top:12px">${escapeHtml(stateError)}</p>` : ""}
@@ -2173,14 +2414,11 @@ function renderAccountsWorkspace(
       <div class="fx-stack">
         <section class="fx-panel">
           <p class="fx-eyebrow">Accounts</p>
-          <h2>Linked money sources</h2>
+          <h2>Your accounts</h2>
           ${
             rows.length
               ? `<div class="list">${rows.join("")}</div>`
-              : `<div class="fx-stack">
-                  <p class="muted">No linked or refreshed accounts yet. Connect a bank above, then open <a href="#/settings">Settings</a> to work through the same setup checklist the app uses.</p>
-                  ${renderSetupOptionList(CORE_SETUP_OPTIONS.slice(0, 3), "No starter items yet.")}
-                </div>`
+              : `<p class="muted">No accounts yet. Connect your bank above to pull live balances.</p>`
           }
         </section>
       </div>
@@ -2188,14 +2426,15 @@ function renderAccountsWorkspace(
         <section class="fx-panel">
           <p class="fx-eyebrow">Activity</p>
           <h2>Transactions</h2>
+          <p class="muted" style="margin-top:0">Click <strong>Adjust</strong> on any transaction to tag it or split it across categories.</p>
           <div class="tx-feed">
             ${
               txRows.length
                 ? txRows.join("")
                 : `<p class="muted" style="padding:16px;margin:0">${
                     rows.length
-                      ? "Pick an account above to load its transactions."
-                      : "Transactions will appear here after you connect a bank, refresh, and choose an account."
+                      ? "Pick an account above to see its transactions."
+                      : "Transactions appear here after you connect your bank."
                   }</p>`
             }
           </div>
@@ -2463,17 +2702,27 @@ function renderEditorFooterButtons(busy: boolean, deletable: boolean): string {
 
 function renderRecurringRuleFields(prefix: string, rule?: { type?: string; anchorDate?: string; dayOfMonth?: number; intervalDays?: number }): string {
   const r = rule ?? {};
-  const opts = ["ONE_TIME", "DAILY", "WEEKLY", "BIWEEKLY", "SEMI_MONTHLY", "MONTHLY", "QUARTERLY", "YEARLY", "EVERY_X_DAYS"];
+  const opts: Array<{ value: string; label: string }> = [
+    { value: "ONE_TIME", label: "One time only" },
+    { value: "DAILY", label: "Every day" },
+    { value: "WEEKLY", label: "Every week" },
+    { value: "BIWEEKLY", label: "Every 2 weeks" },
+    { value: "SEMI_MONTHLY", label: "Twice a month" },
+    { value: "MONTHLY", label: "Every month" },
+    { value: "QUARTERLY", label: "Every 3 months" },
+    { value: "YEARLY", label: "Every year" },
+    { value: "EVERY_X_DAYS", label: "Every X days" },
+  ];
   return `
     <div class="field">
-      <span style="font-weight:600">Repeats</span>
+      <span style="font-weight:600">How often</span>
       <select name="${prefix}_type">
-        ${opts.map((o) => `<option value="${o}"${r.type === o ? " selected" : ""}>${o.toLowerCase().replace(/_/g, " ")}</option>`).join("")}
+        ${opts.map((o) => `<option value="${o.value}"${r.type === o.value ? " selected" : ""}>${escapeHtml(o.label)}</option>`).join("")}
       </select>
     </div>
-    <label class="field">Anchor date<input type="date" name="${prefix}_anchor" value="${escapeAttr(r.anchorDate ?? "")}" /></label>
-    <label class="field">Day of month (for monthly)<input type="number" name="${prefix}_dayOfMonth" min="1" max="31" value="${escapeAttr(r.dayOfMonth ?? "")}" /></label>
-    <label class="field">Interval days (for every-x-days)<input type="number" name="${prefix}_intervalDays" min="1" value="${escapeAttr(r.intervalDays ?? "")}" /></label>
+    <label class="field">Next date<input type="date" name="${prefix}_anchor" value="${escapeAttr(r.anchorDate ?? "")}" /></label>
+    <label class="field">Day of the month (if monthly)<input type="number" name="${prefix}_dayOfMonth" min="1" max="31" placeholder="e.g. 15" value="${escapeAttr(r.dayOfMonth ?? "")}" /></label>
+    <label class="field">Every how many days (if "Every X days")<input type="number" name="${prefix}_intervalDays" min="1" placeholder="e.g. 10" value="${escapeAttr(r.intervalDays ?? "")}" /></label>
   `;
 }
 
@@ -2503,8 +2752,8 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
         <div class="field">
           <span style="font-weight:600">Policy</span>
           <select name="paymentPolicy">
-            <option value="HARD_DUE"${(existing?.paymentPolicy ?? "HARD_DUE") === "HARD_DUE" ? " selected" : ""}>Hard due date (must pay on time)</option>
-            <option value="FLEXIBLE_DUE"${existing?.paymentPolicy === "FLEXIBLE_DUE" ? " selected" : ""}>Flexible (can be delayed)</option>
+            <option value="HARD_DUE"${(existing?.paymentPolicy ?? "HARD_DUE") === "HARD_DUE" ? " selected" : ""}>Must pay on time (hard due date)</option>
+            <option value="FLEXIBLE_DUE"${existing?.paymentPolicy === "FLEXIBLE_DUE" ? " selected" : ""}>Flexible — can be delayed</option>
           </select>
         </div>
         <label class="field"><input name="isEssential" type="checkbox"${existing?.isEssential ? " checked" : ""}/> Essential (never delay)</label>
@@ -2562,7 +2811,13 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
         <div class="field">
           <span style="font-weight:600">Type</span>
           <select name="type">
-            ${["INSTALLMENT", "REVOLVING", "CREDIT_CARD", "LOAN", "BORROW"].map((t) => `<option value="${t}"${(existing?.type ?? "INSTALLMENT") === t ? " selected" : ""}>${t}</option>`).join("")}
+            ${[
+              { value: "INSTALLMENT", label: "Installment loan" },
+              { value: "REVOLVING", label: "Revolving balance" },
+              { value: "CREDIT_CARD", label: "Credit card" },
+              { value: "LOAN", label: "Loan" },
+              { value: "BORROW", label: "Borrowed money" },
+            ].map((t) => `<option value="${t.value}"${(existing?.type ?? "INSTALLMENT") === t.value ? " selected" : ""}>${escapeHtml(t.label)}</option>`).join("")}
           </select>
         </div>
       `;
@@ -2603,7 +2858,13 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
         <div class="field">
           <span style="font-weight:600">Arrangement</span>
           <select name="arrangement">
-            ${["RENT_MONTH_TO_MONTH", "RENT_LEASE", "MORTGAGE", "LAND_CONTRACT", "OTHER"].map((t) => `<option value="${t}"${(existing?.arrangement ?? "RENT_MONTH_TO_MONTH") === t ? " selected" : ""}>${t.toLowerCase().replace(/_/g, " ")}</option>`).join("")}
+            ${[
+              { value: "RENT_MONTH_TO_MONTH", label: "Rent — month to month" },
+              { value: "RENT_LEASE", label: "Rent — lease" },
+              { value: "MORTGAGE", label: "Mortgage" },
+              { value: "LAND_CONTRACT", label: "Land contract" },
+              { value: "OTHER", label: "Other" },
+            ].map((t) => `<option value="${t.value}"${(existing?.arrangement ?? "RENT_MONTH_TO_MONTH") === t.value ? " selected" : ""}>${escapeHtml(t.label)}</option>`).join("")}
           </select>
         </div>
       `;
@@ -2618,7 +2879,12 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
         <div class="field">
           <span style="font-weight:600">Scenario mode</span>
           <select name="selectedScenarioMode">
-            ${(["FIXED", "LOWEST_INCOME", "MOST_EFFICIENT", "HIGHEST_INCOME"] as const).map((m) => `<option value="${m}"${s.selectedScenarioMode === m ? " selected" : ""}>${m.toLowerCase().replace(/_/g, " ")}</option>`).join("")}
+            ${[
+              { value: "FIXED", label: "Use typical paycheck amount" },
+              { value: "LOWEST_INCOME", label: "Plan for low paychecks" },
+              { value: "MOST_EFFICIENT", label: "Balanced" },
+              { value: "HIGHEST_INCOME", label: "Plan for high paychecks" },
+            ].map((m) => `<option value="${m.value}"${s.selectedScenarioMode === m.value ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("")}
           </select>
         </div>
       `;
@@ -2651,15 +2917,13 @@ function renderSettingsWorkspace(
   busy: boolean,
   plannerState: PlannerStateRow | null,
 ) {
-  const snapshotSource = plannerState?.snapshot ?? createDefaultPlannerSnapshot();
-  const snapshot = coercePlannerSnapshotShape(snapshotSource);
+  void plannerState;
   return `
-    <div class="fx-layout fx-layout--split">
-      <div class="fx-stack">
+    <div class="fx-settings">
+      <div class="fx-settings__top">
         <section class="fx-panel fx-panel--highlight">
-          <p class="fx-eyebrow">Settings</p>
-          <h2>Profile + appearance</h2>
-          <p class="muted">Keep the Supabase profile layer and theme settings in one place while the deterministic planner stays read-only.</p>
+          <p class="fx-eyebrow">Profile</p>
+          <h2>Your account</h2>
           <form id="form-profile" class="list">
             <label class="field">Display name<input name="display_name" type="text" value="${escapeHtml(profile?.display_name ?? "")}" placeholder="First name or nickname" /></label>
             <input type="hidden" name="accent_color" id="field-accent" value="${escapeHtml(accent)}" />
@@ -2681,9 +2945,8 @@ function renderSettingsWorkspace(
         </section>
 
         <section class="fx-panel">
-          <p class="fx-eyebrow">Theme</p>
-          <h2>Vault colors</h2>
-          <p class="muted">Presets inspired by cash, bullion, and momentum—or dial in your own accent.</p>
+          <p class="fx-eyebrow">Accent</p>
+          <h2>Theme color</h2>
           <div class="fx-theme-grid" id="theme-presets" role="group" aria-label="Theme presets">
             ${themePresetButtons(accent)}
           </div>
@@ -2691,121 +2954,12 @@ function renderSettingsWorkspace(
             <label class="field">Custom accent<input id="field-color-picker" type="color" value="${escapeHtml(accent)}" aria-label="Custom accent color" /></label>
           </div>
         </section>
-        <section class="fx-panel fx-panel--highlight">
-          <p class="fx-eyebrow">Setup guide</p>
-          <h2>Same options as the app</h2>
-          <p class="muted">Use this checklist to see the same Setup, Planning, App, and Data options the Android app exposes today.</p>
-        </section>
       </div>
 
-      <div class="fx-stack">
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Planner sync</p>
-          <h2>Canonical state contract</h2>
-          <div class="fx-inline-list fx-inline-list--plain">
-            <li>Schema: <strong>${escapeHtml(plannerState?.planner_schema_version ?? "billpayer-shared-v1")}</strong></li>
-            <li>Engine: <strong>${escapeHtml(plannerState?.planner_engine_version ?? "not recorded")}</strong></li>
-            <li>Platform: <strong>${escapeHtml(plannerState?.source_platform ?? "unknown")}</strong></li>
-            <li>App version: <strong>${escapeHtml(plannerState?.source_app_version ?? "unknown")}</strong></li>
-            <li>Source updated: <strong>${escapeHtml(plannerState?.source_updated_at ?? plannerState?.updated_at ?? "—")}</strong></li>
-          </div>
-          <p class="muted">The website and the Android app both read and write this same row. Edits here recompute via the shared engine and sync back to the app.</p>
-          <div class="row" style="margin-top:12px">
-            <button type="button" id="btn-recompute-plan" ${state.normalizedSnapshotBusy ? "disabled" : ""}>${state.normalizedSnapshotBusy ? "Recomputing…" : "Recompute plan"}</button>
-          </div>
-          ${state.normalizedSnapshotError ? `<p class="error">${escapeHtml(state.normalizedSnapshotError)}</p>` : ""}
-        </section>
+      <div class="fx-settings__body">
+        ${renderNormalizedSettings(state.normalizedSnapshot)}
       </div>
     </div>
-
-    ${renderNormalizedSettings(state.normalizedSnapshot)}
-
-    <details class="fx-panel" style="margin-top:12px">
-      <summary style="cursor:pointer"><strong>Advanced: edit planner snapshot JSON</strong></summary>
-      <p class="muted" style="margin-top:8px">For power users and data migration. The friendly forms above are the recommended way to edit.</p>
-      ${renderSetupGroups(WEB_SETTINGS_GROUPS)}
-    <form id="form-planner-sections" class="fx-stack">
-      <section class="fx-panel fx-panel--highlight">
-        <p class="fx-eyebrow">Web setup editor</p>
-        <h2>Save the same planner sections your app account uses</h2>
-        <p class="muted">Edit the planner snapshot section by section below, then save it to this signed-in account. This mirrors the app’s account inputs more directly than the old checklist-only view.</p>
-        <div class="row" style="margin-top:12px">
-          <button type="submit" ${state.plannerSnapshotSaveBusy ? "disabled" : ""}>${state.plannerSnapshotSaveBusy ? "Saving…" : "Save all sections"}</button>
-        </div>
-      </section>
-
-      <section class="fx-panel">
-        <p class="fx-eyebrow">Setup</p>
-        <h2>Core planner inputs</h2>
-        <label class="field">
-          Today
-          <input id="planner-section-today" name="planner-section-today" type="date" value="${escapeHtml(String(snapshot.today ?? todayIsoDate()))}" />
-          <span class="muted">Planner snapshot anchor date.</span>
-        </label>
-        ${renderPlannerSectionJsonField("planner-section-accounts", "Accounts", "Same account list used by the app planner.", snapshot.accounts, 8)}
-        ${renderPlannerSectionJsonField("planner-section-incomeSources", "Income sources", "Pay sources, recurring rules, and amount ranges.", snapshot.incomeSources, 8)}
-        ${renderPlannerSectionJsonField("planner-section-bills", "Bills", "Due amounts, recurring rules, and bill policies.", snapshot.bills, 8)}
-        ${renderPlannerSectionJsonField("planner-section-expenses", "Expenses", "Recurring and essential spending inputs.", snapshot.expenses, 8)}
-        ${renderPlannerSectionJsonField("planner-section-debts", "Debts", "Balances, due dates, status, and payoff behavior.", snapshot.debts, 8)}
-        ${renderPlannerSectionJsonField("planner-section-housingConfig", "Housing config", "Rent or mortgage setup. Use null if not configured yet.", snapshot.housingConfig, 8)}
-        ${renderPlannerSectionJsonField("planner-section-housingBuckets", "Housing buckets", "Current and arrears bucket details.", snapshot.housingBuckets, 8)}
-      </section>
-
-      <section class="fx-panel">
-        <p class="fx-eyebrow">Activity</p>
-        <h2>Recorded activity and actuals</h2>
-        ${renderPlannerSectionJsonField("planner-section-paychecks", "Paychecks", "Recorded real or forecasted paychecks.", snapshot.paychecks, 8)}
-        ${renderPlannerSectionJsonField("planner-section-paycheckActions", "Paycheck actions", "Bill groups and essential allocations attached to paychecks.", snapshot.paycheckActions, 8)}
-        ${renderPlannerSectionJsonField("planner-section-billPayments", "Bill payments", "Payments already made against bills.", snapshot.billPayments, 8)}
-        ${renderPlannerSectionJsonField("planner-section-debtTransactions", "Debt transactions", "Debt payments, borrow events, and repayments.", snapshot.debtTransactions, 8)}
-        ${renderPlannerSectionJsonField("planner-section-expenseSpends", "Expense spending", "Actual spend entries for recurring expenses.", snapshot.expenseSpends, 8)}
-        ${renderPlannerSectionJsonField("planner-section-housingPayments", "Housing payments", "Actual rent or housing payment records.", snapshot.housingPayments, 8)}
-        ${renderPlannerSectionJsonField("planner-section-cashAdjustments", "Cash adjustments", "Cash in, cash out, reimbursements, refunds, and corrections.", snapshot.cashAdjustments, 8)}
-      </section>
-
-      <section class="fx-panel">
-        <p class="fx-eyebrow">Planning</p>
-        <h2>Goals, rules, and preferences</h2>
-        ${renderPlannerSectionJsonField("planner-section-goals", "Goals", "Savings and target goals.", snapshot.goals, 8)}
-        ${renderPlannerSectionJsonField("planner-section-deductionRules", "Paycheck rules", "Mandatory or optional paycheck deductions.", snapshot.deductionRules, 8)}
-        ${renderPlannerSectionJsonField("planner-section-settings", "Planner settings", "Planning preferences, reserve rules, scenario mode, and safety settings.", snapshot.settings, 10)}
-      </section>
-
-      <section class="fx-panel">
-        <p class="fx-eyebrow">App</p>
-        <h2>Organization and reminders</h2>
-        ${renderPlannerSectionJsonField("planner-section-categories", "Categories", "User-defined categories.", snapshot.categories, 6)}
-        ${renderPlannerSectionJsonField("planner-section-labels", "Custom labels", "User-defined labels.", snapshot.labels, 6)}
-        ${renderPlannerSectionJsonField("planner-section-notificationSettings", "Notification settings", "Payday and planner reminder settings.", snapshot.notificationSettings, 8)}
-      </section>
-
-      <section class="fx-panel">
-        <p class="fx-eyebrow">Data</p>
-        <h2>Backup and app metadata</h2>
-        ${renderPlannerSectionJsonField("planner-section-exportMetadata", "Export metadata", "Backup/import metadata saved in the snapshot.", snapshot.exportMetadata, 6)}
-        ${renderPlannerSectionJsonField("planner-section-demoModeState", "Demo mode state", "App mode metadata carried in the canonical snapshot.", snapshot.demoModeState, 6)}
-      </section>
-    </form>
-    <section class="fx-panel fx-panel--highlight">
-      <p class="fx-eyebrow">Planner data</p>
-      <h2>Save full planner inputs for this account</h2>
-      <p class="muted">This editor saves the canonical <code>PlannerSnapshot</code> JSON for your signed-in account, including accounts, income, paychecks, bills, expenses, debts, housing, goals, paycheck rules, categories, labels, notifications, and planner settings.</p>
-      <div class="row" style="margin:12px 0">
-        <button type="button" class="secondary" id="btn-planner-template" ${state.plannerSnapshotSaveBusy ? "disabled" : ""}>Load starter template</button>
-        <button type="button" class="secondary" id="btn-planner-reset" ${state.plannerSnapshotSaveBusy ? "disabled" : ""}>Reset to current saved snapshot</button>
-        <button type="button" class="secondary" id="btn-planner-format" ${state.plannerSnapshotSaveBusy ? "disabled" : ""}>Format JSON</button>
-        <button type="button" id="btn-planner-save" ${state.plannerSnapshotSaveBusy ? "disabled" : ""}>${state.plannerSnapshotSaveBusy ? "Saving…" : "Save planner inputs"}</button>
-      </div>
-      <p class="muted">Current row source: <strong>${escapeHtml(plannerState?.source_platform ?? "none yet")}</strong> · planner output: <strong>${plannerState?.plan ? "present" : "none"}</strong>. Saving from web clears any stale plan until the shared planner engine recalculates.</p>
-      <label class="field" style="margin-top:12px">
-        PlannerSnapshot JSON
-        <textarea id="field-planner-snapshot" rows="28" spellcheck="false" style="width:100%;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">${escapeHtml(
-          state.plannerSnapshotDraft || plannerSnapshotPretty(snapshotSource),
-        )}</textarea>
-      </label>
-      ${state.plannerSnapshotSaveError ? `<p class="error">${escapeHtml(state.plannerSnapshotSaveError)}</p>` : ""}
-    </section>
-    </details>
   `;
 }
 
@@ -2839,14 +2993,23 @@ function renderApp() {
       : "";
     const n = typeof amt === "number" ? amt : Number(amt);
     const cls = n >= 0 ? "amt-pos" : "amt-neg";
+    const assignment = state.txAssignments[txId];
+    const tagClass = !assignment || assignment.kind === "UNCATEGORIZED"
+      ? "tx-tag tx-tag--untagged"
+      : assignment.kind === "SPLIT"
+        ? "tx-tag tx-tag--split"
+        : "tx-tag";
+    const tagLabel = assignment?.label ?? "Not tagged";
+    const btnLabel = assignment && assignment.kind !== "UNCATEGORIZED" ? "Edit" : "Tag";
     return `
       <div class="tx">
         <div class="tx-main">
           <div class="tx-title">${escapeHtml(desc)}</div>
-          <div class="tx-date">${escapeHtml(date)}</div>
+          <div class="tx-date">${escapeHtml(date)}${merchant ? ` · ${escapeHtml(merchant)}` : ""}</div>
+          <span class="${tagClass}">${escapeHtml(tagLabel)}</span>
         </div>
         <div class="${cls}">${money(n)}</div>
-        <button type="button" class="secondary tx-adjust" data-categorize-tx="${escapeAttr(txId)}" data-categorize-desc="${escapeAttr(desc)}" data-categorize-merchant="${escapeAttr(merchant)}" data-categorize-amount="${escapeAttr(n)}" data-categorize-date="${escapeAttr(date)}" title="Adjust category or link to a bill/debt/expense">Adjust</button>
+        <button type="button" class="secondary tx-adjust" data-categorize-tx="${escapeAttr(txId)}" data-categorize-desc="${escapeAttr(desc)}" data-categorize-merchant="${escapeAttr(merchant)}" data-categorize-amount="${escapeAttr(n)}" data-categorize-date="${escapeAttr(date)}">${btnLabel}</button>
       </div>
     `;
   });
@@ -2903,7 +3066,7 @@ function renderApp() {
 
         ${
           !isSupabaseConfigured
-            ? `<div class="banner">A.Pay preview: add <strong>.env</strong> with <strong>VITE_SUPABASE_URL</strong> and <strong>VITE_SUPABASE_ANON_KEY</strong> so sign-in and bank link work end-to-end.</div>`
+            ? `<div class="banner">A.Pay is in preview mode. Sign-in and bank linking are unavailable until the server is connected.</div>`
             : ""
         }
         ${state.error ? `<div class="banner banner--alert" role="alert">${escapeHtml(state.error)}</div>` : ""}
@@ -2911,7 +3074,7 @@ function renderApp() {
         <footer class="fx-app-footer">
           <a href="#/privacy">Privacy</a>
           <a href="#/terms">Terms</a>
-          <span>Planner truth: BillPayer shared engine · Backend truth: Supabase</span>
+          <span>© ${new Date().getFullYear()} A.Pay</span>
         </footer>
       </div>
       ${renderSettingsEditorOverlay(state.normalizedSnapshot)}
@@ -2920,66 +3083,126 @@ function renderApp() {
   `;
 }
 
+function categoryTargetOptions(snap: PlannerSnapshot | null, isCredit: boolean, selected: string): string {
+  const opt = (value: string, label: string) =>
+    `<option value="${escapeAttr(value)}"${value === selected ? " selected" : ""}>${escapeHtml(label)}</option>`;
+  const optgroup = (label: string, items: string[]) =>
+    items.length ? `<optgroup label="${escapeAttr(label)}">${items.join("")}</optgroup>` : "";
+
+  const bills = (snap?.bills ?? []).map((b) => opt(`BILL:${b.id}`, b.name));
+  const debts = (snap?.debts ?? []).map((d) => opt(`DEBT:${d.id}`, d.name));
+  const expenses = (snap?.expenses ?? []).map((e) => opt(`EXPENSE:${e.id}`, e.name));
+  const housing = (snap?.housingBuckets ?? []).map((h) => opt(`HOUSING:${h.id}`, h.label));
+  const goals = (snap?.goals ?? []).map((g) => opt(`GOAL:${g.id}`, g.name));
+  const cash = isCredit ? [opt("CASH_IN:", "Cash in (untracked)")] : [opt("CASH_OUT:", "Cash out (untracked)")];
+
+  return [
+    opt("UNCATEGORIZED:", "— pick a category —"),
+    optgroup("Bills", bills),
+    optgroup("Debts", debts),
+    optgroup("Expenses", expenses),
+    optgroup("Housing", housing),
+    optgroup("Goals", goals),
+    optgroup("Other", cash),
+  ].join("");
+}
+
+function renderSplitRow(
+  row: CategorizeSplitRow,
+  index: number,
+  snap: PlannerSnapshot | null,
+  isCredit: boolean,
+  canRemove: boolean,
+): string {
+  const categoryOptions = categoryTargetOptions(snap, isCredit, row.target);
+  return `
+    <div class="fx-splits__row" data-split-id="${escapeAttr(row.id)}">
+      <label class="field">
+        <span style="font-weight:600">${index === 0 ? "Category" : `Category ${index + 1}`}</span>
+        <select data-split-field="target">${categoryOptions}</select>
+      </label>
+      <label class="field">
+        <span style="font-weight:600">Amount</span>
+        <input type="number" step="0.01" min="0" data-split-field="amount" value="${escapeAttr(row.amount.toFixed(2))}" />
+      </label>
+      <button
+        type="button"
+        class="danger fx-splits__remove"
+        data-split-action="remove"
+        ${canRemove ? "" : "disabled"}
+        title="${canRemove ? "Remove this split" : "At least one row is required"}"
+        aria-label="Remove split"
+      >×</button>
+    </div>
+  `;
+}
+
 function renderCategorizeOverlay(snap: PlannerSnapshot | null): string {
   const c = state.categorizeEditor;
   if (!c) return "";
   const busy = state.normalizedSnapshotBusy;
-  const amountLabel = money(c.amount);
+  const transactionAmount = Math.abs(c.amount);
   const isCredit = c.amount > 0;
-  const billOpts = (snap?.bills ?? []).map((b) =>
-    `<option value="BILL:${escapeAttr(b.id)}">Bill · ${escapeHtml(b.name)}</option>`
+  const splitsTotal = c.splits.reduce((sum, s) => sum + (Number.isFinite(s.amount) ? Math.abs(s.amount) : 0), 0);
+  const remaining = Math.round((transactionAmount - splitsTotal) * 100) / 100;
+  const totalsClass = Math.abs(remaining) < 0.01
+    ? "fx-splits__totals--good"
+    : remaining < 0
+      ? "fx-splits__totals--bad"
+      : "";
+
+  const splitRows = c.splits.map((row, i) =>
+    renderSplitRow(row, i, snap, isCredit, c.splits.length > 1),
   ).join("");
-  const debtOpts = (snap?.debts ?? []).map((d) =>
-    `<option value="DEBT:${escapeAttr(d.id)}">Debt · ${escapeHtml(d.name)}</option>`
-  ).join("");
-  const expenseOpts = (snap?.expenses ?? []).map((e) =>
-    `<option value="EXPENSE:${escapeAttr(e.id)}">Expense · ${escapeHtml(e.name)}</option>`
-  ).join("");
-  const housingOpts = (snap?.housingBuckets ?? []).map((h) =>
-    `<option value="HOUSING:${escapeAttr(h.id)}">Housing · ${escapeHtml(h.label)}</option>`
-  ).join("");
-  const goalOpts = (snap?.goals ?? []).map((g) =>
-    `<option value="GOAL:${escapeAttr(g.id)}">Goal · ${escapeHtml(g.name)}</option>`
-  ).join("");
-  const cashOpts = isCredit
-    ? `<option value="CASH_IN:">Cash in (untracked deposit)</option>`
-    : `<option value="CASH_OUT:">Cash out (untracked spend)</option>`;
+
+  const hasSingleCategory = c.splits.length === 1 && c.splits[0].target !== "UNCATEGORIZED:";
+  const displayLabel = c.merchant || c.description;
+
   return `
     <div class="fx-auth-modal fx-auth-modal--open" role="dialog" aria-modal="true" aria-labelledby="categorize-title">
       <button type="button" class="fx-auth-modal__backdrop" data-categorize-cancel aria-label="Close"></button>
-      <div class="fx-auth-modal__panel" style="max-width:620px">
+      <div class="fx-auth-modal__panel" style="max-width:640px">
         <div class="fx-auth-modal__chrome">
-          <h2 id="categorize-title" class="fx-auth-modal__title">Adjust this transaction</h2>
+          <h2 id="categorize-title" class="fx-auth-modal__title">Tag this transaction</h2>
           <button type="button" class="fx-auth-modal__close" data-categorize-cancel aria-label="Close">×</button>
         </div>
-        <form id="form-categorize" class="fx-auth-modal__form list" data-tx-id="${escapeAttr(c.txId)}" data-tx-desc="${escapeAttr(c.description)}" data-tx-merchant="${escapeAttr(c.merchant ?? "")}" data-tx-amount="${escapeAttr(c.amount)}" data-tx-date="${escapeAttr(c.postedDate ?? "")}">
-          <p class="muted" style="margin:0 0 4px">This updates how the planner treats a transaction that came from your bank sync. It does <strong>not</strong> create a transaction — only your bank can do that.</p>
-          <div class="fx-mini-list" style="margin:8px 0">
+        <form id="form-categorize" class="fx-auth-modal__form list">
+          <div class="fx-mini-list" style="margin:0 0 6px">
             <article class="fx-mini-list__item">
               <div>
                 <strong>${escapeHtml(c.description)}</strong>
                 <p>${escapeHtml(c.postedDate ?? "")}${c.merchant ? ` · ${escapeHtml(c.merchant)}` : ""}</p>
               </div>
-              <span>${amountLabel}</span>
+              <span>${money(c.amount)}</span>
             </article>
           </div>
-          <div class="field">
-            <span style="font-weight:600">Link to</span>
-            <select name="target">
-              <option value="UNCATEGORIZED:">(Uncategorized · leave out of planner actuals)</option>
-              ${cashOpts}
-              ${billOpts}
-              ${debtOpts}
-              ${expenseOpts}
-              ${housingOpts}
-              ${goalOpts}
-            </select>
-            <span class="muted">Picking a bill, debt, expense, or housing bucket posts this transaction as a planner actual so the plan recomputes against it.</span>
+
+          <p class="muted" style="margin:0">Pick a category for this transaction. Split it across more than one by pressing <strong>+ Add another category</strong>.</p>
+
+          ${c.loadingAssignments
+            ? `<p class="muted">Loading existing tags…</p>`
+            : `<div class="fx-splits">${splitRows}</div>`}
+
+          <button type="button" class="secondary fx-splits__add" data-split-action="add">+ Add another category</button>
+
+          <div class="fx-splits__totals ${totalsClass}">
+            <span>Transaction total: <strong>${money(transactionAmount)}</strong></span>
+            <span>Tagged: <strong>${money(splitsTotal)}</strong></span>
+            <span>Remaining: <strong>${money(remaining)}</strong></span>
           </div>
-          <label class="field">Note<input name="note" placeholder="Optional note" /></label>
+
+          <label class="field">Note (optional)<input data-categorize-note value="${escapeAttr(c.note)}" placeholder="e.g. Split between rent and utilities" /></label>
+
+          ${hasSingleCategory
+            ? `<label class="field fx-checkbox">
+                <input type="checkbox" data-categorize-learn checked />
+                <span>Always tag "${escapeHtml(displayLabel)}" this way in the future</span>
+              </label>`
+            : ""}
+
           <div class="row" style="justify-content:flex-end;margin-top:12px">
             <button type="button" class="secondary" data-categorize-cancel>Cancel</button>
-            <button type="submit" ${busy ? "disabled" : ""}>${busy ? "Saving…" : "Save adjustment"}</button>
+            <button type="submit" ${busy ? "disabled" : ""}>${busy ? "Saving…" : "Save"}</button>
           </div>
           ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
         </form>
@@ -3110,7 +3333,7 @@ function wireAuth() {
 
   document.querySelector<HTMLFormElement>("#form-contact")?.addEventListener("submit", (e) => {
     e.preventDefault();
-    state.info = "Message queued (wire this form to email/tickets when ready).";
+    state.info = "Thanks — we'll get back to you.";
     state.error = null;
     render();
     setTimeout(() => {
@@ -3449,24 +3672,152 @@ function wireApp() {
   wireCategorizeButtons();
 }
 
+/** Convert a DB assignment row into "KIND:id" strings used by the split editor. */
+function splitTargetFromAssignment(row: {
+  categoryKind: string; billId: string | null; debtId: string | null;
+  expenseId: string | null; goalId: string | null; housingBucketId: string | null;
+}): string {
+  const kind = row.categoryKind.toUpperCase();
+  switch (kind) {
+    case "BILL": return `BILL:${row.billId ?? ""}`;
+    case "DEBT": return `DEBT:${row.debtId ?? ""}`;
+    case "EXPENSE": return `EXPENSE:${row.expenseId ?? ""}`;
+    case "GOAL": return `GOAL:${row.goalId ?? ""}`;
+    case "HOUSING": return `HOUSING:${row.housingBucketId ?? ""}`;
+    case "CASH_IN": return "CASH_IN:";
+    case "CASH_OUT": return "CASH_OUT:";
+    default: return "UNCATEGORIZED:";
+  }
+}
+
+function parseSplitTarget(value: string): PlannerActualTarget {
+  const [kindRaw, idRaw] = value.split(":");
+  const kind = (kindRaw || "UNCATEGORIZED").toUpperCase();
+  const id = (idRaw ?? "").trim();
+  switch (kind) {
+    case "BILL": return id ? { kind: "BILL", id } : { kind: "UNCATEGORIZED" };
+    case "DEBT": return id ? { kind: "DEBT", id } : { kind: "UNCATEGORIZED" };
+    case "EXPENSE": return id ? { kind: "EXPENSE", id } : { kind: "UNCATEGORIZED" };
+    case "GOAL": return id ? { kind: "GOAL", id } : { kind: "UNCATEGORIZED" };
+    case "HOUSING": return id ? { kind: "HOUSING", id } : { kind: "UNCATEGORIZED" };
+    case "INCOME": return id ? { kind: "INCOME", id } : { kind: "UNCATEGORIZED" };
+    case "CASH_IN": return { kind: "CASH_IN" };
+    case "CASH_OUT": return { kind: "CASH_OUT" };
+    default: return { kind: "UNCATEGORIZED" };
+  }
+}
+
+function newSplitRowLocalId(): string {
+  return `split_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** Read the live split values from the form DOM back into state.categorizeEditor.splits. */
+function syncSplitsFromForm(): void {
+  const c = state.categorizeEditor;
+  if (!c) return;
+  const form = document.querySelector<HTMLFormElement>("#form-categorize");
+  if (!form) return;
+  const rows = form.querySelectorAll<HTMLDivElement>("[data-split-id]");
+  const next: CategorizeSplitRow[] = [];
+  rows.forEach((el) => {
+    const id = el.getAttribute("data-split-id") ?? newSplitRowLocalId();
+    const targetEl = el.querySelector<HTMLSelectElement>('[data-split-field="target"]');
+    const amountEl = el.querySelector<HTMLInputElement>('[data-split-field="amount"]');
+    const target = targetEl?.value ?? "UNCATEGORIZED:";
+    const amount = Number(amountEl?.value ?? 0);
+    next.push({ id, target, amount: Number.isFinite(amount) ? amount : 0, note: "" });
+  });
+  if (next.length > 0) c.splits = next;
+  const noteEl = form.querySelector<HTMLInputElement>("[data-categorize-note]");
+  if (noteEl) c.note = noteEl.value;
+}
+
+async function openCategorizeEditor(btn: HTMLButtonElement): Promise<void> {
+  const txId = btn.getAttribute("data-categorize-tx") ?? "";
+  if (!txId) return;
+  const description = btn.getAttribute("data-categorize-desc") ?? "";
+  const merchant = btn.getAttribute("data-categorize-merchant") ?? "";
+  const amountAttr = Number(btn.getAttribute("data-categorize-amount") ?? 0);
+  const amount = Number.isFinite(amountAttr) ? amountAttr : 0;
+  const postedDate = btn.getAttribute("data-categorize-date") ?? "";
+  const transactionAmount = Math.abs(amount);
+
+  // Show the dialog immediately with a placeholder row so the user sees feedback.
+  state.categorizeEditor = {
+    txId,
+    description,
+    merchant: merchant || null,
+    amount,
+    postedDate: postedDate || null,
+    splits: [{ id: newSplitRowLocalId(), target: "UNCATEGORIZED:", amount: transactionAmount, note: "" }],
+    note: "",
+    loadingAssignments: true,
+  };
+  state.error = null;
+  render();
+
+  // Then try to load any existing categorization + splits the user saved before.
+  const userId = state.session?.user?.id;
+  if (!userId) {
+    if (state.categorizeEditor) state.categorizeEditor.loadingAssignments = false;
+    render();
+    return;
+  }
+  try {
+    const assignments = await loadTransactionAssignments(userId, txId);
+    if (!state.categorizeEditor || state.categorizeEditor.txId !== txId) return;
+
+    let note = "";
+    let splits: CategorizeSplitRow[] = [];
+    if (assignments.splits.length > 0) {
+      splits = assignments.splits.map((s) => ({
+        id: newSplitRowLocalId(),
+        target: splitTargetFromAssignment({
+          categoryKind: s.categoryKind,
+          billId: s.billId,
+          debtId: s.debtId,
+          expenseId: s.expenseId,
+          goalId: s.goalId,
+          housingBucketId: s.housingBucketId,
+        }),
+        amount: Math.abs(s.amount),
+        note: s.note,
+      }));
+      note = assignments.categorization?.note ?? "";
+    } else if (assignments.categorization && assignments.categorization.categoryKind !== "UNCATEGORIZED") {
+      splits = [{
+        id: newSplitRowLocalId(),
+        target: splitTargetFromAssignment({
+          categoryKind: assignments.categorization.categoryKind,
+          billId: assignments.categorization.billId,
+          debtId: assignments.categorization.debtId,
+          expenseId: assignments.categorization.expenseId,
+          goalId: assignments.categorization.goalId,
+          housingBucketId: assignments.categorization.housingBucketId,
+        }),
+        amount: transactionAmount,
+        note: "",
+      }];
+      note = assignments.categorization.note;
+    }
+
+    if (splits.length > 0) {
+      state.categorizeEditor.splits = splits;
+      state.categorizeEditor.note = note;
+    }
+    state.categorizeEditor.loadingAssignments = false;
+    render();
+  } catch (e) {
+    console.warn("failed to load existing transaction tags", e);
+    if (state.categorizeEditor) state.categorizeEditor.loadingAssignments = false;
+    render();
+  }
+}
+
 function wireCategorizeButtons() {
   document.querySelectorAll<HTMLButtonElement>("[data-categorize-tx]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const txId = btn.getAttribute("data-categorize-tx") ?? "";
-      if (!txId) return;
-      const description = btn.getAttribute("data-categorize-desc") ?? "";
-      const merchant = btn.getAttribute("data-categorize-merchant") ?? "";
-      const amount = Number(btn.getAttribute("data-categorize-amount") ?? 0);
-      const postedDate = btn.getAttribute("data-categorize-date") ?? "";
-      state.categorizeEditor = {
-        txId,
-        description,
-        merchant: merchant || null,
-        amount: Number.isFinite(amount) ? amount : 0,
-        postedDate: postedDate || null,
-      };
-      state.error = null;
-      render();
+      void openCategorizeEditor(btn);
     });
   });
   document.querySelectorAll<HTMLElement>("[data-categorize-cancel]").forEach((el) => {
@@ -3476,51 +3827,168 @@ function wireCategorizeButtons() {
       render();
     });
   });
+
+  // Add split
+  document.querySelectorAll<HTMLButtonElement>('[data-split-action="add"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const c = state.categorizeEditor;
+      if (!c) return;
+      syncSplitsFromForm();
+      const used = c.splits.reduce((s, r) => s + (Number.isFinite(r.amount) ? Math.abs(r.amount) : 0), 0);
+      const remaining = Math.max(0, Math.round((Math.abs(c.amount) - used) * 100) / 100);
+      c.splits = [
+        ...c.splits,
+        { id: newSplitRowLocalId(), target: "UNCATEGORIZED:", amount: remaining, note: "" },
+      ];
+      render();
+    });
+  });
+
+  // Remove split
+  document.querySelectorAll<HTMLButtonElement>('[data-split-action="remove"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const c = state.categorizeEditor;
+      if (!c) return;
+      const row = btn.closest<HTMLElement>("[data-split-id]");
+      const id = row?.getAttribute("data-split-id");
+      if (!id) return;
+      syncSplitsFromForm();
+      if (c.splits.length <= 1) return;
+      c.splits = c.splits.filter((s) => s.id !== id);
+      render();
+    });
+  });
+
+  // Recalculate totals when any split field changes (without full re-render so focus is kept).
+  document.querySelectorAll<HTMLElement>("#form-categorize [data-split-field], #form-categorize [data-categorize-note]").forEach((el) => {
+    el.addEventListener("input", () => {
+      syncSplitsFromForm();
+      // Only re-render the totals area for performance/focus stability.
+      const c = state.categorizeEditor;
+      if (!c) return;
+      const total = Math.abs(c.amount);
+      const tagged = c.splits.reduce((s, r) => s + (Number.isFinite(r.amount) ? Math.abs(r.amount) : 0), 0);
+      const remaining = Math.round((total - tagged) * 100) / 100;
+      const totals = document.querySelector<HTMLDivElement>(".fx-splits__totals");
+      if (totals) {
+        totals.classList.remove("fx-splits__totals--good", "fx-splits__totals--bad");
+        if (Math.abs(remaining) < 0.01) totals.classList.add("fx-splits__totals--good");
+        else if (remaining < 0) totals.classList.add("fx-splits__totals--bad");
+        totals.innerHTML = `
+          <span>Transaction total: <strong>${money(total)}</strong></span>
+          <span>Tagged: <strong>${money(tagged)}</strong></span>
+          <span>Remaining: <strong>${money(remaining)}</strong></span>
+        `;
+      }
+    });
+  });
+
   document.querySelector<HTMLFormElement>("#form-categorize")?.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const form = e.target as HTMLFormElement;
+    syncSplitsFromForm();
+    const c = state.categorizeEditor;
     const userId = state.session?.user?.id;
-    if (!userId) return;
-    const fd = new FormData(form);
-    const targetRaw = String(fd.get("target") ?? "UNCATEGORIZED:");
-    const [kindRaw, idRaw] = targetRaw.split(":");
-    const kind = (kindRaw || "UNCATEGORIZED").toUpperCase() as PlannerActualTarget["kind"];
-    const id = (idRaw ?? "").trim();
-    const note = String(fd.get("note") ?? "").trim();
-    const txId = form.getAttribute("data-tx-id") ?? "";
-    const description = form.getAttribute("data-tx-desc") ?? "";
-    const merchant = form.getAttribute("data-tx-merchant") ?? "";
-    const amount = Number(form.getAttribute("data-tx-amount") ?? 0);
-    const postedDate = form.getAttribute("data-tx-date") ?? "";
-    if (!txId) return;
+    if (!c || !userId) return;
+
+    // Validate: each selected category must have a non-zero amount; at most one UNCATEGORIZED row.
+    const cleanSplits: CategorizeSplitRow[] = c.splits
+      .filter((r) => Number.isFinite(r.amount) && Math.abs(r.amount) > 0)
+      .map((r, i) => ({ ...r, amount: Math.abs(r.amount), note: r.note, id: r.id || newSplitRowLocalId(), position: i } as CategorizeSplitRow & { position?: number }));
+
+    if (cleanSplits.length === 0) {
+      state.error = "Enter an amount for at least one category.";
+      render();
+      return;
+    }
+
+    const transactionAmount = Math.abs(c.amount);
+    const totalled = cleanSplits.reduce((s, r) => s + r.amount, 0);
+    if (totalled - transactionAmount > 0.01) {
+      state.error = `Tagged total (${money(totalled)}) is more than the transaction (${money(transactionAmount)}). Reduce one of the amounts.`;
+      render();
+      return;
+    }
+
+    const form = e.target as HTMLFormElement;
+    const learnAlways = (form.querySelector<HTMLInputElement>("[data-categorize-learn]")?.checked) ?? false;
+    const isSplit = cleanSplits.length > 1;
+    const primary = cleanSplits[0];
+    const primaryTarget = parseSplitTarget(primary.target);
+
     await withRecompute(async () => {
+      // Primary categorization row for quick display / legacy readers.
       await saveTransactionCategorization(userId, {
-        transactionId: txId,
-        categoryKind: kind,
-        billId: kind === "BILL" ? id : null,
-        debtId: kind === "DEBT" ? id : null,
-        expenseId: kind === "EXPENSE" ? id : null,
-        goalId: kind === "GOAL" ? id : null,
-        housingBucketId: kind === "HOUSING" ? id : null,
-        note,
+        transactionId: c.txId,
+        categoryKind: isSplit ? "SPLIT" : primaryTarget.kind,
+        billId: !isSplit && primaryTarget.kind === "BILL" ? primaryTarget.id : null,
+        debtId: !isSplit && primaryTarget.kind === "DEBT" ? primaryTarget.id : null,
+        expenseId: !isSplit && primaryTarget.kind === "EXPENSE" ? primaryTarget.id : null,
+        goalId: !isSplit && primaryTarget.kind === "GOAL" ? primaryTarget.id : null,
+        housingBucketId: !isSplit && primaryTarget.kind === "HOUSING" ? primaryTarget.id : null,
+        note: c.note,
         isUserOverride: true,
       });
-      const txRef = {
-        id: txId,
-        description,
-        merchant,
-        amount,
-        postedDate: postedDate || null,
-      };
-      if (kind === "BILL" || kind === "DEBT" || kind === "EXPENSE" || kind === "HOUSING") {
-        if (id) {
-          await linkTransactionToPlannerActual(userId, txId, { kind, id }, txRef, "Manual");
-        }
+
+      // Persist split rows. When there's only one row we still wipe the splits table so
+      // stale data from a previous multi-split save never lingers.
+      if (isSplit) {
+        await saveTransactionSplits(userId, c.txId, cleanSplits.map((s, i) => {
+          const t = parseSplitTarget(s.target);
+          return {
+            id: s.id,
+            position: i,
+            amount: s.amount,
+            categoryKind: t.kind,
+            billId: t.kind === "BILL" ? t.id : null,
+            debtId: t.kind === "DEBT" ? t.id : null,
+            expenseId: t.kind === "EXPENSE" ? t.id : null,
+            goalId: t.kind === "GOAL" ? t.id : null,
+            housingBucketId: t.kind === "HOUSING" ? t.id : null,
+            note: s.note,
+          };
+        }));
       } else {
-        // UNCATEGORIZED, CASH_IN, CASH_OUT, GOAL, INCOME: remove any planner actual tied to this tx
-        await deleteTransactionLinkedActuals(userId, txId);
+        await saveTransactionSplits(userId, c.txId, []);
       }
-    }, "Transaction adjusted and plan recomputed.");
+
+      // Post planner actuals (bill_payments / debt_transactions / expense_spends / housing_payments)
+      // for every split that points at something the planner can protect.
+      const txRef = {
+        id: c.txId,
+        description: c.description,
+        merchant: c.merchant ?? "",
+        amount: c.amount,
+        postedDate: c.postedDate,
+      };
+      const actuals = cleanSplits.map((s, i) => ({
+        index: i,
+        target: parseSplitTarget(s.target),
+        amount: s.amount,
+        note: s.note,
+      }));
+      await linkTransactionSplitsToPlannerActuals(userId, c.txId, actuals, txRef, "Manual");
+
+      // Teach auto-categorize — only for the single-category case to avoid guessing splits.
+      if (learnAlways && !isSplit && primaryTarget.kind !== "UNCATEGORIZED" && primaryTarget.kind !== "CASH_IN" && primaryTarget.kind !== "CASH_OUT") {
+        const matcherValue = (c.merchant || c.description || "").trim();
+        if (matcherValue) {
+          const ruleTargetKind = primaryTarget.kind as "BILL" | "DEBT" | "EXPENSE" | "GOAL" | "HOUSING";
+          const id = "id" in primaryTarget ? primaryTarget.id : "";
+          await upsertCategoryRuleFromAdjustment(userId, {
+            matcherValue,
+            name: `Always tag "${matcherValue}" as ${ruleTargetKind.toLowerCase()}`,
+            targetKind: ruleTargetKind,
+            targetBillId: ruleTargetKind === "BILL" ? id : null,
+            targetDebtId: ruleTargetKind === "DEBT" ? id : null,
+            targetExpenseId: ruleTargetKind === "EXPENSE" ? id : null,
+            targetGoalId: ruleTargetKind === "GOAL" ? id : null,
+            targetHousingBucketId: ruleTargetKind === "HOUSING" ? id : null,
+          });
+        }
+      }
+    }, isSplit ? "Split saved." : "Tagged.");
+
+    await refreshTxAssignmentCache();
     state.categorizeEditor = null;
     render();
   });

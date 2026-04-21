@@ -2012,26 +2012,154 @@ button:disabled {
 
 .tx {
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 10px;
-  align-items: start;
+  grid-template-columns: 1fr auto auto;
+  gap: 10px 14px;
+  align-items: center;
   padding: 14px 16px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+@media (max-width: 540px) {
+  .tx {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "main amount"
+      "main button";
+  }
+  .tx .tx-main { grid-area: main; }
+  .tx .amt-pos,
+  .tx .amt-neg { grid-area: amount; justify-self: end; }
+  .tx .tx-adjust { grid-area: button; justify-self: end; }
 }
 
 .tx:last-child {
   border-bottom: none;
 }
 
+.tx-main {
+  min-width: 0;
+}
+
 .tx-title {
   font-size: 0.95rem;
   font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tx-date {
   font-size: 0.8rem;
   color: var(--muted);
   margin-top: 4px;
+}
+
+.tx-adjust {
+  font-size: 0.85rem;
+  padding: 6px 12px;
+}
+
+.tx-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 600;
+  margin-top: 4px;
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
+.tx-tag--split {
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+  color: var(--success);
+}
+
+.tx-tag--untagged {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+}
+
+/* Split editor */
+.fx-splits {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 4px 0 4px;
+}
+
+.fx-splits__row {
+  display: grid;
+  grid-template-columns: 1fr 130px auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.fx-splits__row .field {
+  margin: 0;
+}
+
+.fx-splits__row input,
+.fx-splits__row select {
+  width: 100%;
+}
+
+.fx-splits__remove {
+  padding: 8px 10px;
+  align-self: end;
+  height: 40px;
+}
+
+.fx-splits__add {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--text);
+  padding: 8px 14px;
+  font-weight: 500;
+}
+
+.fx-splits__add:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.fx-splits__totals {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 0.9rem;
+}
+
+.fx-splits__totals strong {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+.fx-splits__totals--bad strong {
+  color: var(--danger);
+}
+
+.fx-splits__totals--good strong {
+  color: var(--success);
+}
+
+@media (max-width: 560px) {
+  .fx-splits__row {
+    grid-template-columns: 1fr;
+  }
+  .fx-splits__remove {
+    justify-self: flex-start;
+    width: auto;
+  }
 }
 
 .amt-pos {
@@ -2121,3 +2249,471 @@ button:disabled {
 a {
   color: var(--accent);
 }
+
+/* ====================================================================== */
+/* Paycheck-to-paycheck planner view                                      */
+/* ====================================================================== */
+
+.fx-planner {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  margin-bottom: 32px;
+}
+
+.fx-paynow-hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 24px;
+  padding: 32px 28px;
+  border-radius: 28px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  background:
+    radial-gradient(120% 160% at 0% 0%, color-mix(in srgb, var(--accent) 28%, transparent), transparent 55%),
+    radial-gradient(100% 120% at 100% 100%, color-mix(in srgb, var(--accent-glow) 18%, transparent), transparent 60%),
+    linear-gradient(145deg, rgba(10, 16, 32, 0.9), rgba(6, 10, 20, 0.75));
+  overflow: hidden;
+  box-shadow:
+    0 20px 60px -30px color-mix(in srgb, var(--accent) 55%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.fx-paynow-hero::after {
+  content: "";
+  position: absolute;
+  inset: -40% -30% auto auto;
+  width: 320px;
+  height: 320px;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--accent) 30%, transparent), transparent 70%);
+  filter: blur(0px);
+  pointer-events: none;
+}
+
+.fx-paynow-hero__left { position: relative; z-index: 1; }
+.fx-paynow-hero__left .fx-eyebrow { margin: 0 0 6px; }
+
+.fx-paynow-hero__value {
+  margin: 4px 0 8px;
+  font-size: clamp(2.6rem, 6vw, 3.8rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #fff 0%, color-mix(in srgb, var(--accent) 85%, #fff) 55%, var(--accent) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: 0 0 60px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.fx-paynow-hero__value.is-zero {
+  background: linear-gradient(135deg, #aab3c6, #7f8aa3);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.fx-paynow-hero__stats {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 1;
+}
+
+.fx-paynow-stat {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 0.92rem;
+}
+
+.fx-paynow-stat span { color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; font-weight: 700; }
+.fx-paynow-stat strong { font-weight: 700; }
+.fx-paynow-stat.is-risk strong { color: #ff6f7a; }
+
+.fx-paynow-hero__actions {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 2;
+}
+
+@media (max-width: 780px) {
+  .fx-paynow-hero {
+    grid-template-columns: 1fr;
+    padding: 24px 20px;
+  }
+  .fx-paynow-hero__actions {
+    position: static;
+    margin-top: 14px;
+  }
+}
+
+.fx-alert-rail {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 780px) {
+  .fx-alert-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.fx-alert {
+  border-radius: 20px;
+  padding: 18px 20px;
+  border: 1px solid color-mix(in srgb, #ffa940 35%, var(--border));
+  background:
+    linear-gradient(140deg, rgba(255, 169, 64, 0.15), rgba(255, 105, 97, 0.1)),
+    rgba(10, 15, 28, 0.85);
+}
+
+.fx-alert--critical {
+  border-color: color-mix(in srgb, #ff4d4f 55%, var(--border));
+  background:
+    linear-gradient(140deg, rgba(255, 77, 79, 0.22), rgba(255, 77, 110, 0.12)),
+    rgba(15, 12, 24, 0.9);
+}
+
+.fx-alert .fx-eyebrow {
+  margin: 0 0 6px;
+  color: color-mix(in srgb, #ffd37e 70%, #fff);
+}
+
+.fx-alert--critical .fx-eyebrow {
+  color: color-mix(in srgb, #ff9aa8 70%, #fff);
+}
+
+.fx-pay-line-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.fx-pay-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.fx-pay-line__main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.fx-pay-line__main span { font-size: 0.82rem; }
+.fx-pay-line__amt { font-weight: 700; white-space: nowrap; }
+
+.fx-paycheck-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.fx-paycheck-stack__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.fx-paycheck-stack__head .fx-eyebrow { margin: 0 0 4px; }
+.fx-paycheck-stack__head h2 { margin: 0; }
+
+.fx-paycheck-rail {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+@media (min-width: 900px) {
+  .fx-paycheck-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (min-width: 1300px) {
+  .fx-paycheck-rail { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+.fx-paycheck {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 18px 14px;
+  border-radius: 22px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015)),
+    rgba(8, 12, 22, 0.78);
+  overflow: hidden;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.fx-paycheck::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: linear-gradient(180deg, var(--accent), transparent);
+  opacity: 0.85;
+}
+
+.fx-paycheck:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  box-shadow: 0 16px 40px -24px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.fx-paycheck__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  padding-left: 6px;
+}
+
+.fx-paycheck__date {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+}
+
+.fx-paycheck__label { font-size: 1.05rem; margin-top: 2px; }
+
+.fx-paycheck__in {
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fx-paycheck__in span { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; }
+.fx-paycheck__in strong {
+  color: color-mix(in srgb, var(--accent) 72%, #fff);
+  font-size: 1.2rem;
+}
+
+.fx-pay-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 6px;
+}
+
+.fx-pay-bucket {
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 10%, var(--border));
+  background: rgba(255, 255, 255, 0.025);
+  padding: 10px 12px;
+}
+
+.fx-pay-bucket--reserve {
+  border-color: color-mix(in srgb, #9d8cff 35%, var(--border));
+  background:
+    linear-gradient(140deg, rgba(157, 140, 255, 0.1), transparent),
+    rgba(255, 255, 255, 0.02);
+}
+
+.fx-pay-bucket__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.fx-pay-bucket__label {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.fx-pay-bucket__total { font-weight: 700; }
+
+.fx-pay-bucket__lines {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  display: grid;
+  gap: 4px;
+}
+
+.fx-pay-bucket__lines li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.88rem;
+  color: color-mix(in srgb, var(--text) 86%, transparent);
+}
+
+.fx-paycheck__foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.fx-pay-foot__amt {
+  font-size: 1.1rem;
+  font-weight: 800;
+  color: color-mix(in srgb, var(--accent) 78%, #fff);
+}
+
+.fx-pay-foot__amt.is-risk { color: #ff6f7a; }
+
+/* Flatter supporting panel variant for low-priority content. */
+.fx-panel--flat {
+  background: rgba(255, 255, 255, 0.02);
+  border-style: dashed;
+  padding: 14px 16px;
+}
+
+/* Simplified settings layout. */
+.fx-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  margin-bottom: 32px;
+}
+
+.fx-settings__top {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+
+@media (min-width: 900px) {
+  .fx-settings__top { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.fx-settings__body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ====================================================================== */
+/* Leftover / "what to do" action plan block                             */
+/* ====================================================================== */
+
+.fx-doplan {
+  border-radius: 24px;
+  padding: 20px 22px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  background:
+    radial-gradient(80% 100% at 100% 0%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 55%),
+    rgba(8, 12, 22, 0.82);
+  box-shadow: 0 18px 46px -28px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.fx-doplan--short {
+  border-color: color-mix(in srgb, #ff6f7a 45%, var(--border));
+  background:
+    radial-gradient(80% 100% at 100% 0%, rgba(255, 111, 122, 0.22), transparent 55%),
+    rgba(24, 10, 14, 0.8);
+  box-shadow: 0 18px 46px -28px rgba(255, 111, 122, 0.55);
+}
+
+.fx-doplan__head .fx-eyebrow { margin: 0 0 4px; }
+.fx-doplan__head h2 { margin: 0 0 4px; }
+.fx-doplan__head p { margin: 0; }
+
+.fx-doplan__list {
+  margin: 14px 0 0;
+  padding-left: 22px;
+  display: grid;
+  gap: 6px;
+  color: color-mix(in srgb, var(--text) 85%, transparent);
+}
+
+.fx-doplan__grid {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 760px) {
+  .fx-doplan__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (min-width: 1180px) {
+  .fx-doplan__grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+.fx-doplan__card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  transition: transform 0.18s ease, border-color 0.18s ease;
+}
+
+.fx-doplan__card:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.fx-doplan__card-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.fx-doplan__icon {
+  font-size: 1.6rem;
+  line-height: 1;
+}
+
+.fx-doplan__card-head strong { display: block; font-weight: 700; }
+
+.fx-doplan__amt {
+  margin: 4px 0 0;
+  font-size: 1.2rem;
+  font-weight: 800;
+  background: linear-gradient(135deg, #fff, color-mix(in srgb, var(--accent) 80%, #fff));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.fx-doplan__card .muted { font-size: 0.88rem; }
+
+.fx-doplan__card button.secondary {
+  margin-top: auto;
+  width: fit-content;
+}
+
+/* Checkbox styling used by the Adjust transaction dialog. */
+.fx-checkbox {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.fx-checkbox input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.fx-checkbox span { line-height: 1.4; }

@@ -11,7 +11,16 @@
 //   - persistable rows for `bank_transactions` + `transaction_categorizations`
 //   - optional planner actuals (bill_payments, debt_transactions, expense_spends, housing_payments, cash_adjustments)
 
-import { newId, upsertBankTransaction, saveTransactionCategorization, linkTransactionToPlannerActual } from "./planner-data";
+import {
+  loadCategoryRules,
+  matchRuleForText,
+  newId,
+  upsertBankTransaction,
+  saveTransactionCategorization,
+  linkTransactionToPlannerActual,
+  type CategoryRule,
+  type CategoryRuleTargetKind,
+} from "./planner-data";
 import type { PlannerSnapshot, RecurringRule, SnapshotBill, SnapshotDebt, SnapshotGoal, SnapshotRecurringExpense, SnapshotHousingBucket, SnapshotIncomeSource } from "./planner-engine-shared";
 
 export interface RawTellerTransaction {
@@ -305,7 +314,72 @@ function scoreIncome(tx: BankTransactionRow, incomeSources: SnapshotIncomeSource
   return out;
 }
 
-export function categorizeTransaction(tx: BankTransactionRow, snapshot: PlannerSnapshot): CategorizationSuggestion {
+/**
+ * Turn a learned {@link CategoryRule} into a concrete target only if the target
+ * entity still exists in the planner snapshot. Skips rules whose referenced
+ * bill/debt/expense/goal/housing bucket was deleted.
+ */
+function targetFromRule(rule: CategoryRule, snapshot: PlannerSnapshot): CategorizationTarget | null {
+  switch (rule.target_kind as CategoryRuleTargetKind) {
+    case "BILL": {
+      const bill = rule.target_bill_id ? snapshot.bills.find((b) => b.id === rule.target_bill_id) : undefined;
+      if (!bill) return null;
+      return { kind: "BILL", billId: bill.id, billName: bill.name };
+    }
+    case "DEBT": {
+      const debt = rule.target_debt_id ? snapshot.debts.find((d) => d.id === rule.target_debt_id) : undefined;
+      if (!debt) return null;
+      return { kind: "DEBT", debtId: debt.id, debtName: debt.name };
+    }
+    case "EXPENSE": {
+      const expense = rule.target_expense_id ? snapshot.expenses.find((e) => e.id === rule.target_expense_id) : undefined;
+      if (!expense) return null;
+      return { kind: "EXPENSE", expenseId: expense.id, expenseName: expense.name };
+    }
+    case "GOAL": {
+      const goal = rule.target_goal_id ? snapshot.goals.find((g) => g.id === rule.target_goal_id) : undefined;
+      if (!goal) return null;
+      return { kind: "GOAL", goalId: goal.id, goalName: goal.name };
+    }
+    case "HOUSING": {
+      const bucket = rule.target_housing_bucket_id
+        ? snapshot.housingBuckets.find((h) => h.id === rule.target_housing_bucket_id)
+        : undefined;
+      if (!bucket) return null;
+      return { kind: "HOUSING", bucketId: bucket.id, bucketLabel: bucket.label };
+    }
+    case "CASH_IN":
+      return { kind: "CASH_IN" };
+    case "CASH_OUT":
+      return { kind: "CASH_OUT" };
+    case "UNCATEGORIZED":
+      return { kind: "UNCATEGORIZED" };
+    default:
+      return null;
+  }
+}
+
+export function categorizeTransaction(
+  tx: BankTransactionRow,
+  snapshot: PlannerSnapshot,
+  rules: CategoryRule[] = [],
+): CategorizationSuggestion {
+  // 1. Learned rules win first — if the user has corrected this merchant before,
+  //    honor it with high confidence so we don't second-guess them.
+  const ruleText = `${tx.merchant ?? ""} ${tx.description ?? ""}`.trim();
+  const ruleMatch = ruleText ? matchRuleForText(rules, ruleText) : null;
+  if (ruleMatch) {
+    const target = targetFromRule(ruleMatch.rule, snapshot);
+    if (target) {
+      return {
+        transactionId: tx.id,
+        target,
+        confidence: ruleMatch.confidence,
+        reason: `Learned rule "${ruleMatch.rule.name}" matched "${ruleMatch.rule.matcher_value}" (${ruleMatch.rule.applied_count ?? 0} prior confirmations).`,
+      };
+    }
+  }
+
   const isCredit = tx.amount > 0;
   const candidates: CandidateTarget[] = [];
   if (isCredit) {
@@ -335,19 +409,32 @@ export function categorizeTransaction(tx: BankTransactionRow, snapshot: PlannerS
   };
 }
 
-export function categorizeTransactions(transactions: BankTransactionRow[], snapshot: PlannerSnapshot): CategorizationSuggestion[] {
-  return transactions.map((t) => categorizeTransaction(t, snapshot));
+export function categorizeTransactions(
+  transactions: BankTransactionRow[],
+  snapshot: PlannerSnapshot,
+  rules: CategoryRule[] = [],
+): CategorizationSuggestion[] {
+  return transactions.map((t) => categorizeTransaction(t, snapshot, rules));
 }
 
 export async function persistAutoCategorizedTransactions(
   userId: string,
   transactions: BankTransactionRow[],
   snapshot: PlannerSnapshot,
-): Promise<{ saved: number; categorized: number; matched: number; asActuals: number }> {
+): Promise<{ saved: number; categorized: number; matched: number; asActuals: number; ruleHits: number }> {
   let saved = 0;
   let categorized = 0;
   let matched = 0;
   let asActuals = 0;
+  let ruleHits = 0;
+  // Load the user's learned rules once so we can short-circuit fuzzy matching
+  // for any transaction where the user already taught us the answer.
+  let rules: CategoryRule[] = [];
+  try {
+    rules = await loadCategoryRules(userId);
+  } catch (e) {
+    console.warn("loadCategoryRules failed", e);
+  }
   for (const tx of transactions) {
     try {
       const txId = await upsertBankTransaction(userId, {
@@ -359,7 +446,8 @@ export async function persistAutoCategorizedTransactions(
         postedDate: tx.postedDate ?? undefined,
       });
       saved++;
-      const suggestion = categorizeTransaction({ ...tx, id: txId }, snapshot);
+      const suggestion = categorizeTransaction({ ...tx, id: txId }, snapshot, rules);
+      if (suggestion.reason.startsWith("Learned rule")) ruleHits++;
       const categoryKind =
         suggestion.target.kind === "BILL"
           ? "BILL"
@@ -400,7 +488,7 @@ export async function persistAutoCategorizedTransactions(
       continue;
     }
   }
-  return { saved, categorized, matched, asActuals };
+  return { saved, categorized, matched, asActuals, ruleHits };
 }
 
 async function persistAsPlannerActual(

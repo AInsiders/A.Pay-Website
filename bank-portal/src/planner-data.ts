@@ -542,6 +542,82 @@ export async function saveTransactionCategorization(userId: string, input: {
   if (error) throw new Error(error.message);
 }
 
+export interface TransactionSplitRow {
+  id: string;
+  amount: number;
+  categoryKind: string;
+  billId: string | null;
+  debtId: string | null;
+  expenseId: string | null;
+  goalId: string | null;
+  housingBucketId: string | null;
+  note: string;
+  position: number;
+}
+
+export interface TransactionCategorizationRow {
+  categoryKind: string;
+  billId: string | null;
+  debtId: string | null;
+  expenseId: string | null;
+  goalId: string | null;
+  housingBucketId: string | null;
+  note: string;
+  isUserOverride: boolean;
+}
+
+/** Load the existing primary category + splits for a transaction so the editor can preload them. */
+export async function loadTransactionAssignments(userId: string, transactionId: string): Promise<{
+  categorization: TransactionCategorizationRow | null;
+  splits: TransactionSplitRow[];
+}> {
+  const [catRes, splitRes] = await Promise.all([
+    supabase
+      .from("transaction_categorizations")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("transaction_id", transactionId)
+      .maybeSingle(),
+    supabase
+      .from("transaction_splits")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("transaction_id", transactionId)
+      .order("position", { ascending: true }),
+  ]);
+
+  const categorization = catRes.data
+    ? {
+      categoryKind: String((catRes.data as Record<string, unknown>).category_kind ?? "UNCATEGORIZED"),
+      billId: ((catRes.data as Record<string, unknown>).bill_id as string | null) ?? null,
+      debtId: ((catRes.data as Record<string, unknown>).debt_id as string | null) ?? null,
+      expenseId: ((catRes.data as Record<string, unknown>).expense_id as string | null) ?? null,
+      goalId: ((catRes.data as Record<string, unknown>).goal_id as string | null) ?? null,
+      housingBucketId: ((catRes.data as Record<string, unknown>).housing_bucket_id as string | null) ?? null,
+      note: String((catRes.data as Record<string, unknown>).note ?? ""),
+      isUserOverride: ((catRes.data as Record<string, unknown>).is_user_override as boolean) ?? false,
+    }
+    : null;
+
+  const splits = (splitRes.data ?? []).map((raw) => {
+    const r = raw as Record<string, unknown>;
+    return {
+      id: String(r.id ?? newId()),
+      amount: Number(r.amount ?? 0),
+      categoryKind: String(r.category_kind ?? "CATEGORY"),
+      billId: (r.bill_id as string | null) ?? null,
+      debtId: (r.debt_id as string | null) ?? null,
+      expenseId: (r.expense_id as string | null) ?? null,
+      goalId: (r.goal_id as string | null) ?? null,
+      housingBucketId: (r.housing_bucket_id as string | null) ?? null,
+      note: String(r.note ?? ""),
+      position: Number(r.position ?? 0),
+    };
+  });
+
+  return { categorization, splits };
+}
+
 /**
  * One-time migration: if the signed-in account has data in `planner_snapshots.snapshot`
  * (typically pushed from the Android app) but the normalized tables are empty, copy the
@@ -862,14 +938,12 @@ function plannerActualId(txId: string, kind: string): string {
  * block the entire re-categorization.
  */
 export async function deleteTransactionLinkedActuals(userId: string, txId: string): Promise<void> {
-  const billId = plannerActualId(txId, "BILL");
-  const debtId = plannerActualId(txId, "DEBT");
-  const expenseId = plannerActualId(txId, "EXPENSE");
-  const housingId = plannerActualId(txId, "HOUSING");
-  await supabase.from("bill_payments").delete().eq("user_id", userId).eq("id", billId);
-  await supabase.from("debt_transactions").delete().eq("user_id", userId).eq("id", debtId);
-  await supabase.from("expense_spends").delete().eq("user_id", userId).eq("id", expenseId);
-  await supabase.from("housing_payments").delete().eq("user_id", userId).eq("id", housingId);
+  // Remove both legacy single-link ids and new split-link ids (tx_<txId>_*).
+  const prefix = `tx_${txId}_`;
+  await supabase.from("bill_payments").delete().eq("user_id", userId).ilike("id", `${prefix}%`);
+  await supabase.from("debt_transactions").delete().eq("user_id", userId).ilike("id", `${prefix}%`);
+  await supabase.from("expense_spends").delete().eq("user_id", userId).ilike("id", `${prefix}%`);
+  await supabase.from("housing_payments").delete().eq("user_id", userId).ilike("id", `${prefix}%`);
 }
 
 /**
@@ -939,6 +1013,139 @@ export async function linkTransactionToPlannerActual(
   }
 }
 
+// ============================================================
+// Category learning rules
+// ============================================================
+
+export type CategoryRuleTargetKind =
+  | "BILL"
+  | "DEBT"
+  | "EXPENSE"
+  | "GOAL"
+  | "HOUSING"
+  | "CATEGORY"
+  | "CASH_IN"
+  | "CASH_OUT"
+  | "UNCATEGORIZED";
+
+export interface CategoryRule {
+  id: string;
+  user_id: string;
+  name: string;
+  matcher_type: string;
+  matcher_value: string;
+  target_kind: CategoryRuleTargetKind;
+  target_category_id?: string | null;
+  target_bill_id?: string | null;
+  target_debt_id?: string | null;
+  target_expense_id?: string | null;
+  target_housing_bucket_id?: string | null;
+  target_goal_id?: string | null;
+  target_custom_label?: string | null;
+  is_enabled: boolean;
+  priority: number;
+  applied_count?: number;
+  last_applied_at?: string | null;
+}
+
+/** Canonical key used to store/lookup per-merchant rules. */
+export function normalizeMerchantKey(raw: string): string {
+  return raw.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+}
+
+export async function loadCategoryRules(userId: string): Promise<CategoryRule[]> {
+  const { data, error } = await supabase
+    .from("category_rules")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("is_enabled", true)
+    .order("priority", { ascending: true })
+    .order("updated_at", { ascending: false });
+  if (error) throw new Error(error.message);
+  return (data ?? []) as CategoryRule[];
+}
+
+/**
+ * Upsert a user-taught rule so the next time a transaction with the same
+ * normalized merchant/description comes in from the bank, the auto-categorizer
+ * classifies it the same way without the user having to touch it again.
+ */
+export async function upsertCategoryRuleFromAdjustment(userId: string, input: {
+  matcherValue: string;
+  name?: string;
+  targetKind: CategoryRuleTargetKind;
+  targetBillId?: string | null;
+  targetDebtId?: string | null;
+  targetExpenseId?: string | null;
+  targetGoalId?: string | null;
+  targetHousingBucketId?: string | null;
+}): Promise<void> {
+  const normalized = normalizeMerchantKey(input.matcherValue);
+  if (!normalized) return;
+  const existing = await supabase
+    .from("category_rules")
+    .select("id, applied_count")
+    .eq("user_id", userId)
+    .eq("matcher_type", "MERCHANT_CONTAINS")
+    .ilike("matcher_value", normalized)
+    .limit(1)
+    .maybeSingle();
+  const id = existing.data?.id ?? newId();
+  const priorCount = Number((existing.data as { applied_count?: number } | null)?.applied_count ?? 0);
+  const row = {
+    id,
+    user_id: userId,
+    name: input.name ?? `Always mark "${input.matcherValue}" as ${input.targetKind}`,
+    matcher_type: "MERCHANT_CONTAINS",
+    matcher_value: normalized,
+    target_kind: input.targetKind,
+    target_bill_id: input.targetKind === "BILL" ? (input.targetBillId ?? null) : null,
+    target_debt_id: input.targetKind === "DEBT" ? (input.targetDebtId ?? null) : null,
+    target_expense_id: input.targetKind === "EXPENSE" ? (input.targetExpenseId ?? null) : null,
+    target_goal_id: input.targetKind === "GOAL" ? (input.targetGoalId ?? null) : null,
+    target_housing_bucket_id: input.targetKind === "HOUSING" ? (input.targetHousingBucketId ?? null) : null,
+    is_enabled: true,
+    priority: 10,
+    applied_count: priorCount + 1,
+    last_applied_at: new Date().toISOString(),
+  };
+  const { error } = await supabase.from("category_rules").upsert(row);
+  if (error) throw new Error(error.message);
+}
+
+export interface RuleMatch {
+  rule: CategoryRule;
+  confidence: number;
+}
+
+/**
+ * Pure helper used by the categorizer. Returns the best learned rule for a
+ * transaction's description/merchant, or null if no rule applies.
+ */
+export function matchRuleForText(rules: CategoryRule[], text: string): RuleMatch | null {
+  const normalized = normalizeMerchantKey(text);
+  if (!normalized) return null;
+  let best: RuleMatch | null = null;
+  for (const rule of rules) {
+    if (!rule.is_enabled) continue;
+    const value = normalizeMerchantKey(rule.matcher_value);
+    if (!value) continue;
+    if (rule.matcher_type === "MERCHANT_CONTAINS" || rule.matcher_type === "TEXT_CONTAINS") {
+      if (normalized.includes(value)) {
+        const base = value.length >= 6 ? 0.99 : value.length >= 4 ? 0.94 : 0.9;
+        const score = Math.min(0.99, base + Math.min(0.05, (rule.applied_count ?? 0) * 0.005));
+        if (!best || score > best.confidence) best = { rule, confidence: score };
+      }
+    } else if (rule.matcher_type === "MERCHANT_EXACT") {
+      if (normalized === value) {
+        const score = Math.min(0.99, 0.98 + Math.min(0.05, (rule.applied_count ?? 0) * 0.005));
+        if (!best || score > best.confidence) best = { rule, confidence: score };
+      }
+    }
+  }
+  return best;
+}
+
 export async function saveTransactionSplits(userId: string, transactionId: string, splits: Array<{
   id?: string;
   amount: number;
@@ -948,6 +1155,7 @@ export async function saveTransactionSplits(userId: string, transactionId: strin
   debtId?: string | null;
   expenseId?: string | null;
   goalId?: string | null;
+  housingBucketId?: string | null;
   note?: string;
   position?: number;
 }>) {
@@ -972,8 +1180,90 @@ export async function saveTransactionSplits(userId: string, transactionId: strin
     debt_id: s.debtId ?? null,
     expense_id: s.expenseId ?? null,
     goal_id: s.goalId ?? null,
+    housing_bucket_id: s.housingBucketId ?? null,
     note: s.note ?? "",
   }));
   const { error } = await supabase.from("transaction_splits").insert(rows);
   if (error) throw new Error(error.message);
+}
+
+export interface SplitActualInput {
+  index: number; // deterministic position so the planner actual id stays stable
+  target: PlannerActualTarget;
+  amount: number;
+  note?: string;
+}
+
+/**
+ * Post multiple planner actuals for a single bank transaction, one per split row.
+ * Each actual gets a deterministic id `tx_<txId>_split<index>_<kind>` so repeated
+ * saves overwrite instead of duplicating. Prior actuals for this transaction are
+ * removed first.
+ */
+export async function linkTransactionSplitsToPlannerActuals(
+  userId: string,
+  txId: string,
+  splits: SplitActualInput[],
+  tx: TransactionRef,
+  sourceLabel = "Bank",
+): Promise<{ posted: number; skipped: number }> {
+  await deleteTransactionLinkedActuals(userId, txId);
+  let posted = 0;
+  let skipped = 0;
+  const date = tx.postedDate ?? new Date().toISOString().slice(0, 10);
+  const label = `${sourceLabel} · ${tx.merchant ?? tx.description}`.slice(0, 120);
+
+  for (const split of splits) {
+    const amount = Math.abs(Number(split.amount) || 0);
+    if (amount <= 0) { skipped++; continue; }
+    const rowId = `tx_${txId}_split${split.index}_${split.target.kind.toLowerCase()}`;
+    const note = (split.note ? `${split.note} · ` : "") + `Linked bank transaction ${tx.id}`;
+    try {
+      if (split.target.kind === "BILL") {
+        const { error } = await supabase.from("bill_payments").upsert(withUser(userId, {
+          id: rowId,
+          bill_id: split.target.id,
+          amount,
+          payment_date: date,
+          source_label: label,
+          note,
+        }));
+        if (!error) posted++; else skipped++;
+      } else if (split.target.kind === "DEBT") {
+        const { error } = await supabase.from("debt_transactions").upsert(withUser(userId, {
+          id: rowId,
+          debt_id: split.target.id,
+          type: "PAYMENT",
+          amount,
+          event_date: date,
+          source_label: label,
+          note,
+        }));
+        if (!error) posted++; else skipped++;
+      } else if (split.target.kind === "EXPENSE") {
+        const { error } = await supabase.from("expense_spends").upsert(withUser(userId, {
+          id: rowId,
+          expense_id: split.target.id,
+          amount,
+          spend_date: date,
+          note,
+        }));
+        if (!error) posted++; else skipped++;
+      } else if (split.target.kind === "HOUSING") {
+        const { error } = await supabase.from("housing_payments").upsert(withUser(userId, {
+          id: rowId,
+          bucket_id: split.target.id,
+          amount,
+          payment_date: date,
+          note,
+        }));
+        if (!error) posted++; else skipped++;
+      } else {
+        skipped++;
+      }
+    } catch {
+      skipped++;
+    }
+  }
+  return { posted, skipped };
 }
