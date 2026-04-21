@@ -50,7 +50,13 @@ Deno.serve(async (req) => {
   const token = row.access_token as string;
 
   if (action === "accounts") {
-    const res = await tellerFetch("/accounts", token);
+    let res: Response;
+    try {
+      res = await tellerFetch("/accounts", token);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return jsonResponse({ error: `Teller request failed: ${msg}` }, 502, req);
+    }
     const text = await res.text();
     if (!res.ok) {
       return jsonResponse({ error: `Teller accounts failed (${res.status}): ${text}` }, 502, req);
@@ -69,7 +75,13 @@ Deno.serve(async (req) => {
   }
 
   const path = `/accounts/${encodeURIComponent(accountId)}/transactions?count=50`;
-  const res = await tellerFetch(path, token);
+  let res: Response;
+  try {
+    res = await tellerFetch(path, token);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return jsonResponse({ error: `Teller request failed: ${msg}` }, 502, req);
+  }
   const text = await res.text();
   if (!res.ok) {
     return jsonResponse({ error: `Teller transactions failed (${res.status}): ${text}` }, 502, req);
