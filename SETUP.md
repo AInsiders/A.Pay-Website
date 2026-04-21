@@ -44,10 +44,12 @@ In Supabase → **Authentication** → **URL Configuration**:
 
 Either:
 
-- **SQL Editor:** run the files in `supabase/migrations/` in order (`20260416000000` then `20260417000000`), or  
+- **SQL Editor:** run the files in `supabase/migrations/` in order (`20260416000000`, `20260417000000`, `20260421000000`, `20260422000000`, `20260422010000`), or  
 - **CLI:** `supabase link` then `supabase db push` (requires [Supabase CLI](https://supabase.com/docs/guides/cli)).
 
 If tools like MCP report `relation "teller_nonces" does not exist`, those migrations have not been applied on that project yet—bank link cannot persist until they are.
+
+`20260421000000` + `20260422000000` add `planner_snapshots` as the cross-platform contract table for synced `PlannerSnapshot` + `PlannerPlan` data coming from the canonical BillPayer shared engine. `20260422010000` makes that table one-row-per-user so Android/web can upsert the latest canonical planner state cleanly.
 
 ### 4. Edge Functions + Teller (only when you want bank linking)
 

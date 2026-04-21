@@ -2,13 +2,22 @@
 
 **First-time setup (secrets + dashboard steps):** see **[SETUP.md](./SETUP.md)** — minimal checklist of what you must paste into Supabase and GitHub.
 
-This folder contains a small static web app that signs users in with **Supabase Auth**, saves profile/theme data in **Postgres**, connects banks through **Teller Connect**, and lists **accounts and transactions** via **Supabase Edge Functions** (server-side token + optional mTLS).
+**Unified system architecture:** see **[ARCHITECTURE.md](./ARCHITECTURE.md)** for how this Supabase/GitHub Pages stack is intended to pair with the canonical planner in `D:/BillPayer/BillPayer/shared/`.
+
+This folder contains a static web app that signs users in with **Supabase Auth**, saves profile/theme data in **Postgres**, connects banks through **Teller Connect**, and lists **accounts and transactions** via **Supabase Edge Functions** (server-side token + optional mTLS).
+
+The intended direction is:
+
+- **planner truth** from `BillPayer/shared/` (`PlannerSnapshot` + `PlannerPlan`)
+- **backend/auth/db truth** from this folder’s Supabase setup
+- **web rendering** of the same deterministic planner outputs instead of a separate web-only planning engine
 
 ## What was added
 
 - `bank-portal/` — Vite + TypeScript single-page app (GitHub Pages–friendly).
 - `supabase/migrations/` — `profiles`, `teller_enrollments`, `teller_nonces` with RLS on `profiles` only.
 - `supabase/functions/` — `teller-nonce`, `teller-enrollment-complete`, `teller-data`, `teller-webhook`.
+- `supabase/migrations/20260421000000_planner_snapshots.sql` + `20260422000000_planner_snapshots_plan_contract.sql` — synced planner input/output state for cross-platform rendering.
 
 ## 1. Supabase database
 

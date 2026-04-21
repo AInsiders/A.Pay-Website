@@ -1,5 +1,16 @@
 import "./styles.css";
 import { invokeEdgeFunction, isSupabaseConfigured, resolvedSupabaseUrl, supabase } from "./supabase";
+import {
+  planAmountShort,
+  plannerPlan,
+  planNextActions,
+  planProtectedAmount,
+  planSafeToSpend,
+  planWarnings,
+  toPlannerStateRow,
+  type PlannerPlan,
+  type PlannerStateRow,
+} from "./planner-state";
 import type { TellerEnrollmentPayload } from "./teller";
 
 /** Edge → Teller can be slow (cold start + bank API). Avoid client-side fetch aborting too early. */
@@ -12,7 +23,10 @@ type Profile = {
   theme_mode?: "dark" | "light" | null;
 };
 
-type RouteId = "home" | "about" | "contact" | "privacy" | "terms" | "dashboard";
+type RouteId = "home" | "about" | "contact" | "privacy" | "terms" | "planner" | "bills" | "accounts" | "settings";
+
+const APP_ONLY_ROUTES = new Set<RouteId>(["planner", "bills", "accounts", "settings"]);
+const APP_PRIMARY_ROUTES = new Set<RouteId>(["home", "planner", "bills", "accounts", "settings"]);
 
 function supabaseHostHint(): string {
   try {
@@ -214,11 +228,15 @@ const DEFAULT_ACCENT = "#5ee7ff";
 function normalizeRouteId(v: string): RouteId {
   const raw = v.trim().toLowerCase();
   if (raw === "" || raw === "home") return "home";
+  if (raw === "dashboard") return "home";
+  if (raw === "planner" || raw === "plan" || raw === "calendar" || raw === "improve") return "planner";
+  if (raw === "bills") return "bills";
+  if (raw === "accounts" || raw === "profile" || raw === "transactions") return "accounts";
+  if (raw === "settings" || raw === "edit") return "settings";
   if (raw === "about" || raw === "about-us" || raw === "aboutus") return "about";
   if (raw === "contact" || raw === "contact-us" || raw === "contactus") return "contact";
   if (raw === "privacy" || raw === "privacy-policy") return "privacy";
   if (raw === "terms" || raw === "terms-and-conditions" || raw === "terms-conditions") return "terms";
-  if (raw === "dashboard") return "dashboard";
   return "home";
 }
 
@@ -396,7 +414,7 @@ async function loadPlannerSnapshot() {
   }
   const { data, error } = await supabase
     .from("planner_snapshots")
-    .select("snapshot, updated_at")
+    .select("*")
     .eq("user_id", state.session.user.id)
     .order("updated_at", { ascending: false })
     .limit(1)
@@ -856,11 +874,428 @@ function themePresetButtons(currentHex: string): string {
   }).join("");
 }
 
+function appNavLink(route: RouteId, label: string, current: RouteId) {
+  const active = current === route ? " is-active" : "";
+  const href = route === "home" ? "#/" : `#/${route}`;
+  return `<a class="fx-app-nav__link${active}" href="${href}" data-app-route="${route}">${escapeHtml(label)}</a>`;
+}
+
+function renderStringList(items: string[], emptyCopy: string) {
+  if (!items.length) return `<p class="muted">${escapeHtml(emptyCopy)}</p>`;
+  return `<ul class="fx-inline-list">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+}
+
+function renderDueRecommendationList(
+  items: { label: string; amount: number; dueDate?: string; rationale?: string }[],
+  emptyCopy: string,
+) {
+  if (!items.length) return `<p class="muted">${escapeHtml(emptyCopy)}</p>`;
+  return `<div class="fx-mini-list">${items
+    .map(
+      (item) => `
+        <article class="fx-mini-list__item">
+          <div>
+            <strong>${escapeHtml(item.label)}</strong>
+            <p>${escapeHtml(item.rationale ?? item.dueDate ?? "No extra detail yet.")}</p>
+          </div>
+          <span>${money(item.amount)}</span>
+        </article>
+      `,
+    )
+    .join("")}</div>`;
+}
+
+function renderTimelineList(
+  items: { date?: string; payerLabel?: string; usableAmount?: number; amountLeftAfterAllocations?: number; allocations?: { label: string; amount: number }[] }[],
+  emptyCopy: string,
+) {
+  if (!items.length) return `<p class="muted">${escapeHtml(emptyCopy)}</p>`;
+  return `<div class="fx-timeline-list">${items
+    .map((item) => {
+      const allocations = (item.allocations ?? []).slice(0, 4);
+      return `
+        <article class="fx-timeline-card">
+          <div class="fx-timeline-card__top">
+            <div>
+              <strong>${escapeHtml(item.payerLabel ?? "Paycheck")}</strong>
+              <p>${escapeHtml(item.date ?? "No date")}</p>
+            </div>
+            <div class="fx-timeline-card__amount">
+              <strong>${money(item.usableAmount ?? 0)}</strong>
+              <p>usable</p>
+            </div>
+          </div>
+          <div class="fx-timeline-card__allocations">
+            ${allocations.length
+              ? allocations.map((allocation) => `<span>${escapeHtml(allocation.label)} · ${money(allocation.amount)}</span>`).join("")
+              : `<span>No allocations captured.</span>`}
+          </div>
+          <p class="muted">Left after allocations: <strong>${money(item.amountLeftAfterAllocations ?? 0)}</strong></p>
+        </article>
+      `;
+    })
+    .join("")}</div>`;
+}
+
+function renderSignedInInfoPage(route: RouteId) {
+  switch (route) {
+    case "privacy":
+      return `
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Legal</p>
+          <h2>Privacy Policy</h2>
+          <p class="muted">Replace this with your final production privacy policy before launch.</p>
+          <div class="fx-prose-lite">
+            <p>We use Supabase for auth and data, and BillPayer planner outputs to explain what is safe to spend. We do not sell personal data.</p>
+            <p>Connected financial data is used to keep the deterministic plan current across platforms.</p>
+          </div>
+        </section>
+      `;
+    case "terms":
+      return `
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Legal</p>
+          <h2>Terms &amp; Conditions</h2>
+          <p class="muted">Replace this with your final production terms before launch.</p>
+          <div class="fx-prose-lite">
+            <p>A.Pay provides deterministic planning guidance. It is not professional financial advice.</p>
+            <p>Forecasts depend on the quality and freshness of the underlying account, bill, debt, and income data.</p>
+          </div>
+        </section>
+      `;
+    case "about":
+      return `
+        <section class="fx-panel">
+          <p class="fx-eyebrow">About</p>
+          <h2>One planner, many platforms</h2>
+          <p class="muted">The canonical planning engine lives in BillPayer shared Kotlin code. This website renders the same plan through Supabase-backed state.</p>
+        </section>
+      `;
+    case "contact":
+      return `
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Contact</p>
+          <h2>Support</h2>
+          <p class="muted">Wire this to email or a helpdesk when you are ready for production support.</p>
+        </section>
+      `;
+    default:
+      return "";
+  }
+}
+
+function renderAppHome(plannerState: PlannerStateRow | null, plan: PlannerPlan | null) {
+  if (!plan) {
+    return `
+      <section class="fx-panel fx-panel--highlight">
+        <p class="fx-eyebrow">Home</p>
+        <h2>No synced planner yet</h2>
+        <p class="muted">Supabase auth, database, and bank connections are ready. Next step is syncing BillPayer’s deterministic <code>PlannerSnapshot</code> and <code>PlannerPlan</code> into <code>planner_snapshots</code> so the web app can render the same safe-to-spend and timeline.</p>
+      </section>
+    `;
+  }
+
+  const safe = planSafeToSpend(plan);
+  const protectedTotal = planProtectedAmount(plan);
+  const shortAmount = planAmountShort(plan);
+  const warnings = planWarnings(plan);
+  const nextActions = planNextActions(plan);
+  const nextPaycheck = plan.nextPaycheckNeed;
+  const scenarioSummaries = plan.scenarioSummaries ?? [];
+
+  return `
+    <section class="fx-app-hero fx-panel fx-panel--highlight">
+      <div>
+        <p class="fx-eyebrow">Home</p>
+        <h1>Safe to spend</h1>
+        <p class="fx-app-hero__value">${money(safe)}</p>
+        <p class="muted">Deterministic result from the BillPayer shared planner, synced through Supabase.</p>
+      </div>
+      <div class="fx-app-hero__meta">
+        <span>Protected: <strong>${money(protectedTotal)}</strong></span>
+        <span>Short: <strong>${money(shortAmount)}</strong></span>
+        <span>Mode: <strong>${escapeHtml(plan.selectedScenarioMode ?? "FIXED")}</strong></span>
+      </div>
+      ${scenarioSummaries.length
+        ? `<div class="fx-scenario-strip">${scenarioSummaries
+            .slice(0, 4)
+            .map(
+              (summary) => `<span class="fx-scenario-pill${summary.feasible ? "" : " is-risk"}">${escapeHtml(summary.label)} · ${
+                summary.feasible ? "working" : "short"
+              }</span>`,
+            )
+            .join("")}</div>`
+        : ""}
+    </section>
+
+    <div class="fx-metric-grid">
+      <section class="fx-metric-card">
+        <p class="fx-metric-card__label">Next paycheck need</p>
+        <strong>${money(nextPaycheck?.targetToStayOnPlan ?? 0)}</strong>
+        <p>${escapeHtml(nextPaycheck?.coverageSummary ?? "No paycheck guidance available yet.")}</p>
+      </section>
+      <section class="fx-metric-card">
+        <p class="fx-metric-card__label">Survival floor</p>
+        <strong>${money(nextPaycheck?.minimumToSurvive ?? 0)}</strong>
+        <p>Minimum needed to stay protected.</p>
+      </section>
+      <section class="fx-metric-card">
+        <p class="fx-metric-card__label">Ideal accelerate</p>
+        <strong>${money(nextPaycheck?.idealToAccelerate ?? 0)}</strong>
+        <p>Optional upside for faster catch-up or debt payoff.</p>
+      </section>
+    </div>
+
+    <div class="fx-layout fx-layout--split">
+      <div class="fx-stack">
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Warnings</p>
+          <h2>What needs attention</h2>
+          ${renderStringList(warnings, "No active warnings.")}
+        </section>
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Pay now</p>
+          <h2>Must be handled next</h2>
+          ${renderDueRecommendationList(plan.whatMustBePaidNow ?? [], "No immediate pay-now items.")}
+        </section>
+      </div>
+      <div class="fx-stack">
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Suggested actions</p>
+          <h2>Best next moves</h2>
+          ${renderStringList(nextActions, "No next-action suggestions yet.")}
+        </section>
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Due soon</p>
+          <h2>Upcoming protected load</h2>
+          ${renderDueRecommendationList(plan.dueSoon ?? [], "Nothing due soon right now.")}
+        </section>
+      </div>
+    </div>
+
+    <section class="fx-panel">
+      <p class="fx-eyebrow">Planner source</p>
+      <h2>Synced state</h2>
+      <p class="muted">Updated <strong>${escapeHtml(plannerState?.updated_at ?? "—")}</strong> from <strong>${escapeHtml(plannerState?.source_platform ?? "unknown")}</strong> using schema <strong>${escapeHtml(plannerState?.planner_schema_version ?? "billpayer-shared-v1")}</strong>.</p>
+    </section>
+  `;
+}
+
+function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: PlannerPlan | null) {
+  if (!plan) {
+    return `
+      <section class="fx-panel">
+        <p class="fx-eyebrow">Planner</p>
+        <h2>Waiting for canonical planner output</h2>
+        <p class="muted">Once BillPayer syncs a <code>PlannerPlan</code> to Supabase, this page will show the paycheck-to-paycheck timeline and current allocation guidance without recreating the engine in JavaScript.</p>
+      </section>
+    `;
+  }
+
+  return `
+    <div class="fx-layout fx-layout--split">
+      <div class="fx-stack">
+        <section class="fx-panel fx-panel--highlight">
+          <p class="fx-eyebrow">Planner</p>
+          <h2>Current paycheck card</h2>
+          ${renderTimelineList(plan.currentPaycheckCard ? [plan.currentPaycheckCard] : [], "No current paycheck card yet.")}
+        </section>
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Timeline</p>
+          <h2>Upcoming paycheck allocations</h2>
+          ${renderTimelineList(plan.timeline?.slice(0, 8) ?? [], "No timeline available yet.")}
+        </section>
+      </div>
+      <div class="fx-stack">
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Forecast</p>
+          <h2>Catch-up + payoff signals</h2>
+          ${renderStringList(
+            (plan.catchUpAnalytics ?? []).slice(0, 6).map((item) => `${item.label}: ${item.projectedCatchUpDate ?? "pending"}`),
+            "No catch-up analytics yet.",
+          )}
+        </section>
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Planner metadata</p>
+          <h2>Engine state</h2>
+          <div class="fx-inline-list fx-inline-list--plain">
+            <li>Last trigger: <strong>${escapeHtml(plan.lastTrigger ?? "REACTIVE")}</strong></li>
+            <li>Debt free date: <strong>${escapeHtml(plan.debtFreeDate ?? "Not reached")}</strong></li>
+            <li>Ending planning cash: <strong>${money(plan.endingPlanningCash ?? 0)}</strong></li>
+            <li>Extra payoff safe now: <strong>${money(plan.safeExtraPayoffAmount ?? 0)}</strong></li>
+          </div>
+          <p class="muted">Synced from ${escapeHtml(plannerState?.source_platform ?? "unknown")} · engine ${escapeHtml(plannerState?.planner_engine_version ?? "current")}</p>
+        </section>
+      </div>
+    </div>
+  `;
+}
+
+function renderBillsWorkspace(plan: PlannerPlan | null) {
+  if (!plan) {
+    return `
+      <section class="fx-panel">
+        <p class="fx-eyebrow">Bills</p>
+        <h2>No planner-backed bill data yet</h2>
+        <p class="muted">This page will render the same due-now, due-soon, overdue, and delayable lists the Android app already computes.</p>
+      </section>
+    `;
+  }
+
+  return `
+    <div class="fx-layout fx-layout--split">
+      <div class="fx-stack">
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Bills</p>
+          <h2>Must pay now</h2>
+          ${renderDueRecommendationList(plan.whatMustBePaidNow ?? [], "No must-pay items right now.")}
+        </section>
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Due soon</p>
+          <h2>Protected upcoming items</h2>
+          ${renderDueRecommendationList(plan.dueSoon ?? [], "Nothing urgent coming up.")}
+        </section>
+      </div>
+      <div class="fx-stack">
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Delay options</p>
+          <h2>What can wait</h2>
+          ${renderDueRecommendationList(plan.whatCanBeDelayed ?? [], "No delay candidates.")}
+        </section>
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Non-payday obligations</p>
+          <h2>Carry-forward + reserves</h2>
+          ${renderDueRecommendationList(
+            (plan.nonPaydayObligations ?? []).map((item) => ({
+              label: item.label,
+              amount: item.remainingAmount ?? item.amount,
+              dueDate: item.effectiveDueDate,
+              rationale: `${item.status ?? "PLANNED"}${item.daysOverdue ? ` · ${item.daysOverdue}d overdue` : ""}`,
+            })),
+            "No non-payday obligations queued.",
+          )}
+        </section>
+      </div>
+    </div>
+  `;
+}
+
+function renderAccountsWorkspace(
+  rows: string[],
+  txRows: string[],
+  tellerReady: boolean,
+  busy: boolean,
+  stateError: string | null,
+) {
+  return `
+    <section class="fx-panel">
+      <p class="fx-eyebrow">Accounts</p>
+      <h2>Connect and refresh real balances</h2>
+      <p class="muted">This is the Supabase + Teller layer from the website stack. It remains the shared backend entrypoint while the planner stays canonical in BillPayer.</p>
+      <div class="row">
+        <button type="button" id="btn-teller" ${busy ? "disabled" : ""}>Connect my bank</button>
+        <button type="button" class="secondary" id="btn-refresh" ${busy ? "disabled" : ""}>Refresh data</button>
+      </div>
+      ${
+        !tellerReady
+          ? `<p class="error" style="margin-top:12px">Bank link needs <strong>VITE_TELLER_APP_ID</strong> in <code>bank-portal/.env</code> (restart dev or rebuild; required at build time for production).</p>`
+          : ""
+      }
+      ${stateError && rows.length === 0 ? `<p class="error" style="margin-top:12px">${escapeHtml(stateError)}</p>` : ""}
+    </section>
+
+    <div class="fx-layout fx-layout--split">
+      <div class="fx-stack">
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Accounts</p>
+          <h2>Linked money sources</h2>
+          ${rows.length ? `<div class="list">${rows.join("")}</div>` : `<p class="muted">Link a bank above to see checking, savings, and more—where your paychecks actually land.</p>`}
+        </section>
+      </div>
+      <div class="fx-stack">
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Activity</p>
+          <h2>Transactions</h2>
+          <div class="tx-feed">
+            ${txRows.length ? txRows.join("") : `<p class="muted" style="padding:16px;margin:0">Connect an account and pick it above to load your stream.</p>`}
+          </div>
+        </section>
+      </div>
+    </div>
+  `;
+}
+
+function renderSettingsWorkspace(
+  profile: Profile | null,
+  accent: string,
+  mode: "dark" | "light",
+  busy: boolean,
+  plannerState: PlannerStateRow | null,
+) {
+  return `
+    <div class="fx-layout fx-layout--split">
+      <div class="fx-stack">
+        <section class="fx-panel fx-panel--highlight">
+          <p class="fx-eyebrow">Settings</p>
+          <h2>Profile + appearance</h2>
+          <p class="muted">Keep the Supabase profile layer and theme settings in one place while the deterministic planner stays read-only.</p>
+          <form id="form-profile" class="list">
+            <label class="field">Display name<input name="display_name" type="text" value="${escapeHtml(profile?.display_name ?? "")}" placeholder="First name or nickname" /></label>
+            <input type="hidden" name="accent_color" id="field-accent" value="${escapeHtml(accent)}" />
+            <div class="field">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+                <span style="font-weight:600">Mode</span>
+                <div class="fx-seg" role="group" aria-label="Theme mode">
+                  <button type="button" class="fx-seg__btn${mode === "dark" ? " is-active" : ""}" data-mode="dark" aria-pressed="${mode === "dark" ? "true" : "false"}">Dark</button>
+                  <button type="button" class="fx-seg__btn${mode === "light" ? " is-active" : ""}" data-mode="light" aria-pressed="${mode === "light" ? "true" : "false"}">Light</button>
+                </div>
+              </div>
+              <input type="hidden" name="theme_mode" id="field-mode" value="${escapeHtml(mode)}" />
+            </div>
+            <div class="row" style="margin-top:4px">
+              <button type="submit" ${busy ? "disabled" : ""}>Save profile</button>
+            </div>
+            ${state.info ? `<p class="success">${escapeHtml(state.info)}</p>` : ""}
+          </form>
+        </section>
+
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Theme</p>
+          <h2>Vault colors</h2>
+          <p class="muted">Presets inspired by cash, bullion, and momentum—or dial in your own accent.</p>
+          <div class="fx-theme-grid" id="theme-presets" role="group" aria-label="Theme presets">
+            ${themePresetButtons(accent)}
+          </div>
+          <div class="fx-color-row">
+            <label class="field">Custom accent<input id="field-color-picker" type="color" value="${escapeHtml(accent)}" aria-label="Custom accent color" /></label>
+          </div>
+        </section>
+      </div>
+
+      <div class="fx-stack">
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Planner sync</p>
+          <h2>Canonical state contract</h2>
+          <div class="fx-inline-list fx-inline-list--plain">
+            <li>Schema: <strong>${escapeHtml(plannerState?.planner_schema_version ?? "billpayer-shared-v1")}</strong></li>
+            <li>Engine: <strong>${escapeHtml(plannerState?.planner_engine_version ?? "not recorded")}</strong></li>
+            <li>Platform: <strong>${escapeHtml(plannerState?.source_platform ?? "unknown")}</strong></li>
+            <li>App version: <strong>${escapeHtml(plannerState?.source_app_version ?? "unknown")}</strong></li>
+            <li>Source updated: <strong>${escapeHtml(plannerState?.source_updated_at ?? plannerState?.updated_at ?? "—")}</strong></li>
+          </div>
+          <p class="muted">The website should render the same planner output the BillPayer shared engine already computed, instead of inventing parallel math here.</p>
+        </section>
+      </div>
+    </div>
+  `;
+}
+
 function renderApp() {
   const profile = state.profile;
   const accent = profile?.accent_color ?? DEFAULT_ACCENT;
   const mode = profile?.theme_mode === "light" ? "light" : "dark";
-  const planner = state.plannerSnapshot as { snapshot?: unknown; updated_at?: string } | null;
+  const plannerState = toPlannerStateRow(state.plannerSnapshot);
+  const plan = plannerPlan(plannerState);
   const rows = (state.accounts as Record<string, unknown>[]).map((a) => {
     const id = String(a.id ?? "");
     const sel = id === state.selectedAccountId ? "secondary" : "";
@@ -896,6 +1331,30 @@ function renderApp() {
     ? `<span class="fx-busy-hint"><span class="fx-spinner" aria-hidden="true"></span> Syncing…</span>`
     : "";
 
+  const routeForNav = APP_PRIMARY_ROUTES.has(state.route) ? state.route : "home";
+  const appNav = `
+    <nav class="fx-app-nav" aria-label="App navigation">
+      ${appNavLink("home", "Home", routeForNav)}
+      ${appNavLink("planner", "Planner", routeForNav)}
+      ${appNavLink("bills", "Bills", routeForNav)}
+      ${appNavLink("accounts", "Accounts", routeForNav)}
+      ${appNavLink("settings", "Settings", routeForNav)}
+    </nav>
+  `;
+
+  const routeBody =
+    state.route === "planner"
+      ? renderPlannerWorkspace(plannerState, plan)
+      : state.route === "bills"
+        ? renderBillsWorkspace(plan)
+        : state.route === "accounts"
+          ? renderAccountsWorkspace(rows, txRows, tellerConfigured(), state.busy, state.error)
+          : state.route === "settings"
+            ? renderSettingsWorkspace(profile, accent, mode, state.busy, plannerState)
+            : state.route === "privacy" || state.route === "terms" || state.route === "about" || state.route === "contact"
+              ? renderSignedInInfoPage(state.route)
+              : renderAppHome(plannerState, plan);
+
   return `
     <div class="fx-root">
       <div class="fx-grid" aria-hidden="true"></div>
@@ -910,6 +1369,7 @@ function renderApp() {
               <span class="fx-brand__tag">Forecast &amp; cash</span>
             </div>
           </div>
+          ${appNav}
           <div class="fx-header__actions">
             <span class="fx-pill"><strong>${escapeHtml(profile?.display_name ?? state.session?.user.email ?? "Member")}</strong></span>
             ${busy}
@@ -923,90 +1383,12 @@ function renderApp() {
             : ""
         }
         ${state.error ? `<div class="banner banner--alert" role="alert">${escapeHtml(state.error)}</div>` : ""}
-
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Bank link</p>
-          <h2>Feed your forecast real data</h2>
-          <div class="row">
-            <button type="button" id="btn-teller" ${state.busy ? "disabled" : ""}>Connect my bank</button>
-            <button type="button" class="secondary" id="btn-refresh" ${state.busy ? "disabled" : ""}>Refresh data</button>
-          </div>
-          ${
-            !tellerConfigured()
-              ? `<p class="error" style="margin-top:12px">Bank link needs <strong>VITE_TELLER_APP_ID</strong> in <code>bank-portal/.env</code> (restart dev or rebuild; required at build time for production).</p>`
-              : ""
-          }
-        </section>
-
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Planner</p>
-          <h2>Mobile plan → web clarity</h2>
-          ${
-            planner?.snapshot
-              ? `<p class="muted">Latest planner snapshot synced from your device. Updated: <strong>${escapeHtml(String(planner.updated_at ?? "—"))}</strong>.</p>
-                 <p class="muted" style="margin:10px 0 0">
-                   Next step: we’ll port the planner math to TypeScript and render Safe-to-spend, Upcoming obligations, and Paycheck allocations here.
-                 </p>`
-              : `<p class="muted">No planner snapshot found yet. Once the mobile app uploads a snapshot to <code>planner_snapshots</code>, the website can render the same plan.</p>`
-          }
-        </section>
-
-        <div class="fx-layout fx-layout--split">
-          <div class="fx-stack">
-            <section class="fx-panel fx-panel--highlight">
-              <p class="fx-eyebrow">Your profile</p>
-              <h2>Make A.Pay yours</h2>
-              <p class="muted">How you appear in the app and the accent color for your personal “million-dollar” dashboard vibe.</p>
-              <form id="form-profile" class="list">
-                <label class="field">Display name<input name="display_name" type="text" value="${escapeHtml(profile?.display_name ?? "")}" placeholder="First name or nickname" /></label>
-                <input type="hidden" name="accent_color" id="field-accent" value="${escapeHtml(accent)}" />
-                <div class="field">
-                  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
-                    <span style="font-weight:600">Mode</span>
-                    <div class="fx-seg" role="group" aria-label="Theme mode">
-                      <button type="button" class="fx-seg__btn${mode === "dark" ? " is-active" : ""}" data-mode="dark" aria-pressed="${mode === "dark" ? "true" : "false"}">Dark</button>
-                      <button type="button" class="fx-seg__btn${mode === "light" ? " is-active" : ""}" data-mode="light" aria-pressed="${mode === "light" ? "true" : "false"}">Light</button>
-                    </div>
-                  </div>
-                  <input type="hidden" name="theme_mode" id="field-mode" value="${escapeHtml(mode)}" />
-                </div>
-                <div class="row" style="margin-top:4px">
-                  <button type="submit" ${state.busy ? "disabled" : ""}>Save profile</button>
-                </div>
-                ${state.info ? `<p class="success">${escapeHtml(state.info)}</p>` : ""}
-              </form>
-            </section>
-
-            <section class="fx-panel">
-              <p class="fx-eyebrow">Look &amp; feel</p>
-              <h2>Vault colors</h2>
-              <p class="muted">Presets inspired by cash, bullion, and momentum—or dial in your own accent. Live preview; save to keep it.</p>
-              <div class="fx-theme-grid" id="theme-presets" role="group" aria-label="Theme presets">
-                ${themePresetButtons(accent)}
-              </div>
-              <div class="fx-color-row">
-                <label class="field">Custom accent<input id="field-color-picker" type="color" value="${escapeHtml(accent)}" aria-label="Custom accent color" /></label>
-              </div>
-            </section>
-          </div>
-
-          <div class="fx-stack">
-            <section class="fx-panel">
-              <p class="fx-eyebrow">Activity</p>
-              <h2>Transactions</h2>
-              <p class="muted">The latest movement on the account you select—so your forecast can match real life.</p>
-              <div class="tx-feed">
-                ${txRows.length ? txRows.join("") : `<p class="muted" style="padding:16px;margin:0">Connect an account and pick it above to load your stream.</p>`}
-              </div>
-            </section>
-
-            <section class="fx-panel">
-              <p class="fx-eyebrow">Your money map</p>
-              <h2>Accounts</h2>
-              ${rows.length ? `<div class="list">${rows.join("")}</div>` : `<p class="muted">Link a bank above to see checking, savings, and more—where your paychecks actually land.</p>`}
-            </section>
-          </div>
-        </div>
+        ${routeBody}
+        <footer class="fx-app-footer">
+          <a href="#/privacy">Privacy</a>
+          <a href="#/terms">Terms</a>
+          <span>Planner truth: BillPayer shared engine · Backend truth: Supabase</span>
+        </footer>
       </div>
     </div>
   `;
@@ -1018,7 +1400,7 @@ function render() {
 
   state.route = readRouteFromHash();
 
-  if (!state.session && state.route === "dashboard") {
+  if (!state.session && APP_ONLY_ROUTES.has(state.route)) {
     state.authModalOpen = true;
     state.route = "home";
     if (window.location.hash !== "#/" && window.location.hash !== "") {
