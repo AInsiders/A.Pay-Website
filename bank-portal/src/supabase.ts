@@ -10,12 +10,6 @@ export const isSupabaseConfigured = Boolean(url && anon);
 export const resolvedSupabaseUrl = url || "https://configure-your-project.supabase.co";
 const resolvedAnon = anon || "sb-publishable-placeholder-not-for-production";
 
-/** Explicit Edge Functions base URL. Must be `…/functions/v1`. */
-function functionsUrlFromProjectUrl(projectUrl: string): string {
-  const base = projectUrl.replace(/\/+$/, "");
-  return `${base}/functions/v1`;
-}
-
 if (!isSupabaseConfigured) {
   console.warn(
     "Supabase env missing: copy .env.example to .env and set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY. UI loads in preview mode.",
@@ -28,9 +22,6 @@ export const supabase = createClient(resolvedSupabaseUrl, resolvedAnon, {
     autoRefreshToken: true,
     detectSessionInUrl: true,
   },
-  ...(isSupabaseConfigured && url
-    ? { functions: { url: functionsUrlFromProjectUrl(url) } }
-    : {}),
 });
 
 /**
@@ -41,7 +32,7 @@ export async function invokeEdgeFunction(
   name: string,
   options?: Parameters<(typeof supabase)["functions"]["invoke"]>[1],
 ): ReturnType<(typeof supabase)["functions"]["invoke"]> {
-  const maxAttempts = 3;
+  const maxAttempts = 4;
   let last: Awaited<ReturnType<(typeof supabase)["functions"]["invoke"]>>;
   for (let i = 0; i < maxAttempts; i++) {
     last = await supabase.functions.invoke(name, options);
@@ -51,7 +42,7 @@ export async function invokeEdgeFunction(
         ? (last.error as { message?: string }).message
         : last.error,
     );
-    const transient = /failed to send a request to the edge function|failed to fetch|networkerror|load failed|aborted|timeout/i.test(
+    const transient = /failed to send a request to the edge function|failed to fetch|networkerror|load failed|aborted|timeout|ecconn|econnreset|socket|timed out/i.test(
       msg,
     );
     if (!transient || i === maxAttempts - 1) return last;

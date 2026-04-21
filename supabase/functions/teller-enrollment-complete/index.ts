@@ -2,6 +2,30 @@ import { verify } from "npm:@noble/ed25519@1.7.3";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { supabaseServiceClient, supabaseUserClient } from "../_shared/supabase.ts";
 
+const FN = "teller-enrollment-complete";
+
+/** Logs to Supabase Edge Function logs (Dashboard → Edge Functions → [function] → Logs). */
+function logEvent(phase: string, detail: Record<string, unknown>) {
+  console.error(JSON.stringify({ fn: FN, phase, ...detail }));
+}
+
+function jsonError(
+  status: number,
+  message: string,
+  code: string,
+  logDetail?: Record<string, unknown>,
+) {
+  logEvent("response", { status, code, message, ...logDetail });
+  return new Response(JSON.stringify({ error: message, code }), {
+    status,
+    headers: {
+      ...corsHeaders,
+      "Content-Type": "application/json",
+      "X-Teller-Error-Code": code,
+    },
+  });
+}
+
 type Body = {
   nonce?: string;
   /** Must match TellerConnect `environment` (sandbox | development | production). */
@@ -58,6 +82,22 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
 
+  try {
+    return await handlePost(req);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const stack = e instanceof Error ? e.stack : undefined;
+    logEvent("unhandled", { message: msg, stack });
+    return jsonError(
+      500,
+      "Unexpected error — check Edge Function logs for details",
+      "unhandled",
+      { originalMessage: msg },
+    );
+  }
+});
+
+async function handlePost(req: Request): Promise<Response> {
   const userClient = supabaseUserClient(req);
   const { data: userData, error: userErr } = await userClient.auth.getUser();
   if (userErr || !userData.user) {
@@ -66,7 +106,11 @@ Deno.serve(async (req) => {
 
   const publicKeys = parsePublicKeys();
   if (publicKeys.length === 0) {
-    return jsonResponse({ error: "TELLER_TOKEN_SIGNING_PUBLIC_KEY not configured" }, 503);
+    return jsonError(
+      503,
+      "TELLER_TOKEN_SIGNING_PUBLIC_KEY not configured",
+      "missing_signing_key",
+    );
   }
 
   let body: Body;
@@ -103,7 +147,13 @@ Deno.serve(async (req) => {
     .maybeSingle();
 
   if (nonceErr) {
-    return jsonResponse({ error: nonceErr.message }, 500);
+    return jsonError(500, nonceErr.message, "nonce_lookup_failed", {
+      supabase: {
+        code: nonceErr.code,
+        details: nonceErr.details,
+        hint: nonceErr.hint,
+      },
+    });
   }
   if (!nonceRow) {
     return jsonResponse({ error: "Invalid, expired, or already used nonce" }, 400);
@@ -139,7 +189,12 @@ Deno.serve(async (req) => {
   }
 
   if (!verified) {
-    return jsonResponse({ error: "Signature verification failed" }, 401);
+    logEvent("signature_verify", {
+      outcome: "failed",
+      keyCount: publicKeys.length,
+      sigCount: signatures.length,
+    });
+    return jsonError(401, "Signature verification failed", "signature_verify_failed");
   }
 
   await admin.from("teller_nonces").delete().eq("nonce", nonce);
@@ -158,8 +213,15 @@ Deno.serve(async (req) => {
   );
 
   if (upsertErr) {
-    return jsonResponse({ error: upsertErr.message }, 500);
+    return jsonError(500, upsertErr.message, "enrollment_upsert_failed", {
+      supabase: {
+        code: upsertErr.code,
+        details: upsertErr.details,
+        hint: upsertErr.hint,
+      },
+    });
   }
 
+  logEvent("enrollment_saved", { userIdSuffix: userData.user.id.slice(-8) });
   return jsonResponse({ ok: true });
-});
+}

@@ -2,6 +2,9 @@ import "./styles.css";
 import { invokeEdgeFunction, isSupabaseConfigured, resolvedSupabaseUrl, supabase } from "./supabase";
 import type { TellerEnrollmentPayload } from "./teller";
 
+/** Edge → Teller can be slow (cold start + bank API). Avoid client-side fetch aborting too early. */
+const TELLER_DATA_INVOKE_TIMEOUT_MS = 150_000;
+
 type Profile = {
   id: string;
   display_name: string | null;
@@ -34,7 +37,7 @@ function formatAuthError(prefix: string, err: unknown): string {
 
   // @supabase/supabase-js when `fetch` to Edge Functions throws before any HTTP response
   if (/failed to send a request to the edge function/i.test(raw)) {
-    return `${prefix}: Could not reach Edge Functions at ${host}. Often: offline, VPN/firewall, browser extension blocking requests, or the Supabase project is paused. Try another network, a private window, and DevTools → Network for a failed …/functions/v1/ request.`;
+    return `${prefix}: Could not reach Edge Functions at ${host}. Check: offline/VPN/firewall, browser extensions, Supabase project paused, or opening the app via file:// (use http://localhost:5173). Bank sync waits up to ${Math.round(TELLER_DATA_INVOKE_TIMEOUT_MS / 1000)}s for Teller—if it still fails, inspect DevTools → Network for …/functions/v1/teller-data.`;
   }
 
   if (err instanceof Error) {
@@ -63,7 +66,13 @@ async function edgeFunctionMessage(err: unknown): Promise<string> {
               (typeof body.error === "string" && body.error) ||
               (typeof body.message === "string" && body.message) ||
               (typeof body.msg === "string" && body.msg);
-            if (piece) return status ? `${piece} (HTTP ${status})` : String(piece);
+            const errCode = typeof body.code === "string" && body.code.trim()
+              ? body.code.trim()
+              : "";
+            if (piece) {
+              const suffix = errCode ? ` [${errCode}]` : "";
+              return status ? `${piece}${suffix} (HTTP ${status})` : `${piece}${suffix}`;
+            }
           } catch {
             return status ? `${text.slice(0, 400)} (HTTP ${status})` : text.slice(0, 400);
           }
@@ -76,6 +85,12 @@ async function edgeFunctionMessage(err: unknown): Promise<string> {
   }
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/** Validates session with Supabase before Edge calls (reduces races right after sign-in or Connect). */
+async function ensureFreshAuthForEdge(): Promise<void> {
+  const { error } = await supabase.auth.getUser();
+  if (error) throw error;
 }
 
 /** Ensures Edge Functions receive a JWT (some browsers/builds omit the default header). */
@@ -216,10 +231,12 @@ async function refreshBankData() {
   state.error = null;
   render();
   try {
+    await ensureFreshAuthForEdge();
     const headers = await bearerAuthHeaders();
     const { data, error } = await invokeEdgeFunction("teller-data", {
       body: { action: "accounts" },
       headers,
+      timeout: TELLER_DATA_INVOKE_TIMEOUT_MS,
     });
     if (error) {
       const msg = await edgeFunctionMessage(error);
@@ -263,10 +280,12 @@ async function loadTransactions() {
   state.error = null;
   render();
   try {
+    await ensureFreshAuthForEdge();
     const headers = await bearerAuthHeaders();
     const { data, error } = await invokeEdgeFunction("teller-data", {
       body: { action: "transactions", accountId: state.selectedAccountId },
       headers,
+      timeout: TELLER_DATA_INVOKE_TIMEOUT_MS,
     });
     if (error) throw new Error(await edgeFunctionMessage(error));
     const payload = data as { transactions?: unknown[]; error?: string };
