@@ -12,13 +12,6 @@ type Profile = {
   theme_mode?: "dark" | "light" | null;
 };
 
-function maskToken(token: string | null | undefined): string {
-  const t = (token ?? "").trim();
-  if (!t) return "—";
-  if (t.length <= 18) return `${t.slice(0, 6)}…${t.slice(-4)}`;
-  return `${t.slice(0, 10)}…${t.slice(-6)}`;
-}
-
 function supabaseHostHint(): string {
   try {
     return new URL(resolvedSupabaseUrl).host;
@@ -621,12 +614,6 @@ function renderApp() {
   const profile = state.profile;
   const accent = profile?.accent_color ?? DEFAULT_ACCENT;
   const mode = profile?.theme_mode === "light" ? "light" : "dark";
-  const user = state.session?.user;
-  const identity = user?.identities?.[0];
-  const provider = (identity?.provider as string | undefined) ?? (user?.app_metadata as { provider?: string } | undefined)?.provider;
-  const lastSignIn = (user as { last_sign_in_at?: string } | null)?.last_sign_in_at ?? null;
-  const createdAt = (user as { created_at?: string } | null)?.created_at ?? null;
-  const accessToken = maskToken(state.session?.access_token);
   const rows = (state.accounts as Record<string, unknown>[]).map((a) => {
     const id = String(a.id ?? "");
     const sel = id === state.selectedAccountId ? "secondary" : "";
@@ -690,6 +677,20 @@ function renderApp() {
         }
         ${state.error ? `<div class="banner banner--alert" role="alert">${escapeHtml(state.error)}</div>` : ""}
 
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Bank link</p>
+          <h2>Feed your forecast real data</h2>
+          <div class="row">
+            <button type="button" id="btn-teller" ${state.busy ? "disabled" : ""}>Connect my bank</button>
+            <button type="button" class="secondary" id="btn-refresh" ${state.busy ? "disabled" : ""}>Refresh data</button>
+          </div>
+          ${
+            !tellerConfigured()
+              ? `<p class="error" style="margin-top:12px">Bank link needs <strong>VITE_TELLER_APP_ID</strong> in <code>bank-portal/.env</code> (restart dev or rebuild; required at build time for production).</p>`
+              : ""
+          }
+        </section>
+
         <div class="fx-layout fx-layout--split">
           <div class="fx-stack">
             <section class="fx-panel fx-panel--highlight">
@@ -717,33 +718,6 @@ function renderApp() {
             </section>
 
             <section class="fx-panel">
-              <p class="fx-eyebrow">Signed-in</p>
-              <h2>Your account</h2>
-              <div class="list">
-                <div class="card">
-                  <p class="muted" style="margin:0 0 8px">These details help debug auth + fetch issues.</p>
-                  <div class="row" style="justify-content:space-between;gap:10px;flex-wrap:wrap">
-                    <span class="fx-pill">Email: <strong>${escapeHtml(user?.email ?? "—")}</strong></span>
-                    <span class="fx-pill">User ID: <strong>${escapeHtml(user?.id ?? "—")}</strong></span>
-                  </div>
-                  <div class="row" style="justify-content:space-between;gap:10px;flex-wrap:wrap;margin-top:10px">
-                    <span class="fx-pill">Provider: <strong>${escapeHtml(provider ?? "email")}</strong></span>
-                    <span class="fx-pill">Access token: <strong>${escapeHtml(accessToken)}</strong></span>
-                  </div>
-                  <div class="row" style="justify-content:space-between;gap:10px;flex-wrap:wrap;margin-top:10px">
-                    <span class="fx-pill">Created: <strong>${escapeHtml(createdAt ? new Date(createdAt).toLocaleString() : "—")}</strong></span>
-                    <span class="fx-pill">Last sign-in: <strong>${escapeHtml(lastSignIn ? new Date(lastSignIn).toLocaleString() : "—")}</strong></span>
-                  </div>
-                </div>
-              </div>
-              ${
-                !isSupabaseConfigured
-                  ? `<p class="error" style="margin-top:12px">Supabase is in preview mode (missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY). Function calls will fail until set.</p>`
-                  : ""
-              }
-            </section>
-
-            <section class="fx-panel">
               <p class="fx-eyebrow">Look &amp; feel</p>
               <h2>Vault colors</h2>
               <p class="muted">Presets inspired by cash, bullion, and momentum—or dial in your own accent. Live preview; save to keep it.</p>
@@ -758,39 +732,18 @@ function renderApp() {
 
           <div class="fx-stack">
             <section class="fx-panel">
-              <p class="fx-eyebrow">Bank link</p>
-              <h2>Feed your forecast real data</h2>
-              <p class="muted">
-                Connect with Teller so deposits, bills, and spending show up where you’re planning. Environment is
-                <strong>${escapeHtml(tellerEnvironment())}</strong>
-                (${tellerEnvironment() === "sandbox" ? "fake institutions" : "real institutions your Teller app is allowed to use"}). Set
-                <code>VITE_TELLER_ENVIRONMENT</code> in <code>bank-portal/.env</code> to <code>sandbox</code>,
-                <code>development</code>, or <code>production</code>, then restart dev or rebuild.
-              </p>
-              <div class="row">
-                <button type="button" id="btn-teller" ${state.busy ? "disabled" : ""}>Connect my bank</button>
-                <button type="button" class="secondary" id="btn-refresh" ${state.busy ? "disabled" : ""}>Refresh data</button>
-              </div>
-              ${
-                !tellerConfigured()
-                  ? `<p class="error" style="margin-top:12px">Bank link needs <strong>VITE_TELLER_APP_ID</strong> in <code>bank-portal/.env</code> (restart dev or rebuild; required at build time for production).</p>`
-                  : ""
-              }
-            </section>
-
-            <section class="fx-panel">
-              <p class="fx-eyebrow">Your money map</p>
-              <h2>Accounts</h2>
-              ${rows.length ? `<div class="list">${rows.join("")}</div>` : `<p class="muted">Link a bank above to see checking, savings, and more—where your paychecks actually land.</p>`}
-            </section>
-
-            <section class="fx-panel">
               <p class="fx-eyebrow">Activity</p>
               <h2>Transactions</h2>
               <p class="muted">The latest movement on the account you select—so your forecast can match real life.</p>
               <div class="tx-feed">
                 ${txRows.length ? txRows.join("") : `<p class="muted" style="padding:16px;margin:0">Connect an account and pick it above to load your stream.</p>`}
               </div>
+            </section>
+
+            <section class="fx-panel">
+              <p class="fx-eyebrow">Your money map</p>
+              <h2>Accounts</h2>
+              ${rows.length ? `<div class="list">${rows.join("")}</div>` : `<p class="muted">Link a bank above to see checking, savings, and more—where your paychecks actually land.</p>`}
             </section>
           </div>
         </div>
