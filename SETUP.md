@@ -47,6 +47,8 @@ Either:
 - **SQL Editor:** run the files in `supabase/migrations/` in order (`20260416000000` then `20260417000000`), or  
 - **CLI:** `supabase link` then `supabase db push` (requires [Supabase CLI](https://supabase.com/docs/guides/cli)).
 
+If tools like MCP report `relation "teller_nonces" does not exist`, those migrations have not been applied on that project yet—bank link cannot persist until they are.
+
 ### 4. Edge Functions + Teller (only when you want bank linking)
 
 Deploy from repo root (after `supabase link`). Use **`--no-verify-jwt`** on these Teller handlers so the hosted gateway does not reject **ES256** session JWTs (your functions still call `getUser()` with the caller’s token):
