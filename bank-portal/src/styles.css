@@ -863,13 +863,32 @@ body {
 }
 
 .fx-doc__prose h2 {
-  margin-top: 18px;
+  margin-top: 22px;
+  margin-bottom: 8px;
+  font-size: 1.08rem;
+}
+
+.fx-doc__prose h3 {
+  margin: 14px 0 6px;
+  font-size: 0.98rem;
+  font-weight: 650;
+  color: color-mix(in srgb, var(--text) 88%, transparent);
 }
 
 .fx-doc__prose p,
 .fx-doc__prose li {
   color: color-mix(in srgb, var(--text) 78%, transparent);
   line-height: 1.7;
+}
+
+.fx-doc__prose ul,
+.fx-doc__prose ol {
+  margin: 8px 0 12px;
+  padding-left: 1.35rem;
+}
+
+.fx-doc__prose li + li {
+  margin-top: 6px;
 }
 
 .fx-doc__cta {

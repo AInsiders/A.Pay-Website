@@ -12,6 +12,11 @@ import {
   type PlannerStateRow,
 } from "./planner-state";
 import type { TellerEnrollmentPayload } from "./teller";
+import {
+  LEGAL_EFFECTIVE_DATE_DISPLAY,
+  privacyPolicyProseHtml,
+  termsOfServiceProseHtml,
+} from "./legal-pages";
 
 /** Edge → Teller can be slow (cold start + bank API). Avoid client-side fetch aborting too early. */
 const TELLER_DATA_INVOKE_TIMEOUT_MS = 150_000;
@@ -627,21 +632,13 @@ function renderPublicPage(route: RouteId) {
         <main class="fx-doc shell-narrow" role="main">
           <p class="fx-doc__eyebrow">Legal</p>
           <h1 class="fx-doc__title">Privacy Policy</h1>
-          <p class="fx-doc__lede">Plain English summary first. Replace with your final policy text before launch.</p>
+          <p class="fx-doc__lede">
+            How A.Pay collects, uses, and discloses information when you use the Services. Last updated ${LEGAL_EFFECTIVE_DATE_DISPLAY}.
+            Have qualified counsel review before launch.
+          </p>
 
           <div class="fx-doc__card fx-doc__prose">
-            <h2>Summary</h2>
-            <ul>
-              <li>We collect the minimum needed to run your account and produce forecasts.</li>
-              <li>Connected bank data is used to keep your plan accurate and current.</li>
-              <li>We do not sell personal data.</li>
-            </ul>
-            <h2>Data we collect</h2>
-            <p>Account/profile info (email, display name), connected financial data (accounts, balances, transactions), and usage events for reliability.</p>
-            <h2>How we use data</h2>
-            <p>To forecast upcoming bills, allocate paychecks, and show a safe-to-spend number. To improve reliability and prevent abuse.</p>
-            <h2>Your control</h2>
-            <p>You can disconnect accounts and request deletion. Use Contact for privacy requests.</p>
+            ${privacyPolicyProseHtml()}
           </div>
         </main>
       `;
@@ -650,15 +647,12 @@ function renderPublicPage(route: RouteId) {
         <main class="fx-doc shell-narrow" role="main">
           <p class="fx-doc__eyebrow">Legal</p>
           <h1 class="fx-doc__title">Terms &amp; Conditions</h1>
-          <p class="fx-doc__lede">Replace with your final terms before launch.</p>
+          <p class="fx-doc__lede">
+            Rules for using A.Pay. Last updated ${LEGAL_EFFECTIVE_DATE_DISPLAY}. Have qualified counsel review before launch.
+          </p>
 
           <div class="fx-doc__card fx-doc__prose">
-            <h2>Service</h2>
-            <p>A.Pay provides planning and forecasting tools. It does not provide professional financial advice.</p>
-            <h2>Accounts</h2>
-            <p>You’re responsible for maintaining the security of your login and for any activity under your account.</p>
-            <h2>Limitations</h2>
-            <p>Forecasts are estimates based on the data available. Always verify important payments and balances.</p>
+            ${termsOfServiceProseHtml()}
           </div>
         </main>
       `;
@@ -944,10 +938,9 @@ function renderSignedInInfoPage(route: RouteId) {
         <section class="fx-panel">
           <p class="fx-eyebrow">Legal</p>
           <h2>Privacy Policy</h2>
-          <p class="muted">Replace this with your final production privacy policy before launch.</p>
-          <div class="fx-prose-lite">
-            <p>We use Supabase for auth and data, and BillPayer planner outputs to explain what is safe to spend. We do not sell personal data.</p>
-            <p>Connected financial data is used to keep the deterministic plan current across platforms.</p>
+          <p class="muted">Last updated ${LEGAL_EFFECTIVE_DATE_DISPLAY}. Counsel review recommended before launch.</p>
+          <div class="fx-doc__card fx-doc__prose" style="margin-top:14px">
+            ${privacyPolicyProseHtml()}
           </div>
         </section>
       `;
@@ -956,10 +949,9 @@ function renderSignedInInfoPage(route: RouteId) {
         <section class="fx-panel">
           <p class="fx-eyebrow">Legal</p>
           <h2>Terms &amp; Conditions</h2>
-          <p class="muted">Replace this with your final production terms before launch.</p>
-          <div class="fx-prose-lite">
-            <p>A.Pay provides deterministic planning guidance. It is not professional financial advice.</p>
-            <p>Forecasts depend on the quality and freshness of the underlying account, bill, debt, and income data.</p>
+          <p class="muted">Last updated ${LEGAL_EFFECTIVE_DATE_DISPLAY}. Counsel review recommended before launch.</p>
+          <div class="fx-doc__card fx-doc__prose" style="margin-top:14px">
+            ${termsOfServiceProseHtml()}
           </div>
         </section>
       `;
