@@ -1895,7 +1895,7 @@ function renderAppHome(plannerState: PlannerStateRow | null, plan: PlannerPlan |
         <p class="fx-eyebrow">Home</p>
         <h1>Safe to spend</h1>
         <p class="fx-app-hero__value">${money(safe)}</p>
-        <p class="muted">What is free to use right now after bills, essentials, and reserves are protected.</p>
+        <p class="muted">What is free after the next-income checkpoint: essentials, hard dues, and cross-paycheck reserves.</p>
       </div>
       <div class="fx-app-hero__meta">
         <span>Protected: <strong>${money(protectedTotal)}</strong></span>
@@ -2010,10 +2010,10 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
         <div class="fx-paynow-hero__left">
           <p class="fx-eyebrow">Safe to spend · right now</p>
           <h1 class="fx-paynow-hero__value ${safe > 0 ? "" : "is-zero"}">${money(safe)}</h1>
-          <p class="muted">After covering essentials, protected bills, debt minimums, and housing.</p>
+          <p class="muted">Wallet checkpoint: essentials to next income, hard dues, and amounts held for bills due after that paycheck.</p>
         </div>
         <div class="fx-paynow-hero__stats">
-          <div class="fx-paynow-stat"><span>Protected</span><strong>${money(protectedTotal)}</strong></div>
+          <div class="fx-paynow-stat"><span>Required in wallet</span><strong>${money(protectedTotal)}</strong></div>
           <div class="fx-paynow-stat ${shortAmount > 0 ? "is-risk" : ""}"><span>Short</span><strong>${money(shortAmount)}</strong></div>
           <div class="fx-paynow-stat">
             <span>Next paycheck</span>
@@ -2024,6 +2024,8 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
           <button type="button" id="btn-recompute-plan" ${state.normalizedSnapshotBusy ? "disabled" : ""}>${state.normalizedSnapshotBusy ? "Updating…" : "Refresh plan"}</button>
         </div>
       </section>
+
+      ${renderPlannerCheckpointSection(plan)}
 
       ${overdueList.length > 0 || dueTodayList.length > 0
         ? `<section class="fx-alert-rail">

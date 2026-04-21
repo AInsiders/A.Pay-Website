@@ -116,7 +116,17 @@ interface PlannerSnapshot {
 
 interface PlannerDueItemRecommendation { sourceId?: string; label: string; amount: number; dueDate?: string; riskLevel?: PlannerRiskLevel; rationale?: string }
 interface PlannerAllocationLine { sourceId?: string | null; label: string; bucket?: string; amount: number; rationale?: string }
-interface PlannerReserveAllocationLine { obligationId?: string; sourceId?: string | null; label: string; amount: number; dueDate?: string; sourcePayDate?: string | null }
+interface PlannerReserveAllocationLine {
+  obligationId?: string; sourceId?: string | null; label: string; amount: number; dueDate?: string; sourcePayDate?: string | null;
+  reserveKind?: string;
+}
+interface PlannerSuggestedEssentialLine {
+  expenseId: string; label: string; intervalDays: number; dailyRate: number;
+  intervalBudget: number; spentLookback: number; remainingBudget: number; suggestedFromSafeToSpend: number;
+}
+interface PlannerFirstFailure {
+  date?: string | null; obligationLabel?: string; shortage?: number; minimumRepairHint?: string;
+}
 interface PlannerTimelinePaycheckPlan {
   date?: string; payerLabel?: string; sourceId?: string | null;
   enteredAmount?: number | null; forecastedAmount?: number | null; deductionAmount?: number;
@@ -133,6 +143,9 @@ interface PlannerDashboardOverview {
   overdueNow?: PlannerDueItemRecommendation[]; dueToday?: PlannerDueItemRecommendation[];
   dueBeforeNextPaycheck?: PlannerDueItemRecommendation[]; reservesHeld?: PlannerReserveAllocationLine[];
   protectedAmount?: number; safeToSpendNow?: number; amountShort?: number; nextBestActions?: string[];
+  intervalDaysUntilNextIncome?: number; nextReliableIncomeDate?: string | null;
+  essentialsDueForCurrentInterval?: number; hardDueBeforeNextIncome?: number; crossPaycheckReserveTotal?: number;
+  requiredCashNow?: number; safeToSpendAfterNextDeposit?: number; suggestedEssentialUse?: PlannerSuggestedEssentialLine[];
 }
 interface PlannerNonPaydayObligation {
   obligationId?: string; sourceId?: string; label: string; sourceType?: string;
@@ -165,6 +178,7 @@ interface PlannerPlan {
   housingCurrentLeft?: number; housingArrearsLeft?: number;
   dueSoon?: PlannerDueItemRecommendation[];
   dashboard?: PlannerDashboardOverview;
+  firstFailure?: PlannerFirstFailure | null;
   warnings?: string[];
   debtFreeDate?: string | null;
   isOutOfDebt?: boolean;
@@ -179,7 +193,7 @@ interface PlannerPlan {
 }
 
 const PLANNER_SCHEMA_VERSION = "billpayer-shared-v1";
-const PLANNER_ENGINE_VERSION = "ts-engine-0.1.0";
+const PLANNER_ENGINE_VERSION = "ts-engine-0.2.0";
 const DEFAULT_HORIZON_DAYS = 120;
 const DUE_SOON_WINDOW_DAYS = 14;
 
@@ -483,6 +497,14 @@ function forecastDebtObligations(snapshot: PlannerSnapshot, today: Date, horizon
   return out;
 }
 
+function liveBalanceForDebt(debt: SnapshotDebt, accountsById: Map<string, SnapshotAccount>): number | null {
+  const linkedId = debt.bankAccountId?.trim();
+  if (!linkedId) return null;
+  const account = accountsById.get(linkedId);
+  if (!account) return null;
+  return Math.abs(account.currentBalance);
+}
+
 function forecastHousingObligations(snapshot: PlannerSnapshot, today: Date): ForecastObligation[] {
   const out: ForecastObligation[] = [];
   for (const bucket of snapshot.housingBuckets) {
@@ -531,6 +553,67 @@ function essentialsBetween(snapshot: PlannerSnapshot, from: Date, to: Date): num
   return money(total);
 }
 
+function spentOnExpenseInWindow(snapshot: PlannerSnapshot, expenseId: string, from: Date, to: Date): number {
+  const f = startOfDay(from).getTime();
+  const t = startOfDay(to).getTime();
+  let sum = 0;
+  for (const s of snapshot.expenseSpends) {
+    if (s.expenseId !== expenseId) continue;
+    const d = parseIsoDate(s.spendDate);
+    if (!d) continue;
+    const x = startOfDay(d).getTime();
+    if (x >= f && x <= t) sum += s.amount || 0;
+  }
+  return money(sum);
+}
+
+function buildSuggestedEssentialUse(
+  snapshot: PlannerSnapshot,
+  today: Date,
+  intervalDays: number,
+  safeToSpendNow: number,
+): PlannerSuggestedEssentialLine[] {
+  if (safeToSpendNow <= 0) return [];
+  const essentials = snapshot.expenses.filter((e) => e.isEssential);
+  if (!essentials.length) return [];
+  const lookbackDays = Math.max(1, Math.min(intervalDays, 90));
+  const spendFrom = addDays(today, -(lookbackDays - 1));
+  const lines: PlannerSuggestedEssentialLine[] = [];
+  for (const e of essentials) {
+    const dr = essentialDailyRate(e);
+    const intervalBudget = money(dr * intervalDays);
+    const spentLookback = spentOnExpenseInWindow(snapshot, e.id, spendFrom, today);
+    const remainingBudget = Math.max(0, money(intervalBudget - spentLookback));
+    lines.push({
+      expenseId: e.id, label: e.name, intervalDays, dailyRate: money(dr), intervalBudget, spentLookback, remainingBudget, suggestedFromSafeToSpend: 0,
+    });
+  }
+  const weights = lines.map((row) =>
+    row.remainingBudget > 0 ? row.remainingBudget : Math.max(0.01, money(row.dailyRate * intervalDays * 0.25)),
+  );
+  const sumW = weights.reduce((a, b) => a + b, 0);
+  if (sumW <= 0) return [];
+  for (let i = 0; i < lines.length; i++) {
+    const raw = money(safeToSpendNow * (weights[i] / sumW));
+    lines[i].suggestedFromSafeToSpend = lines[i].remainingBudget > 0
+      ? money(Math.min(raw, lines[i].remainingBudget))
+      : money(raw);
+  }
+  const totalSuggested = money(lines.reduce((s, r) => s + r.suggestedFromSafeToSpend, 0));
+  if (totalSuggested > safeToSpendNow + 0.01) {
+    const scale = safeToSpendNow / Math.max(totalSuggested, 0.01);
+    for (const row of lines) row.suggestedFromSafeToSpend = money(row.suggestedFromSafeToSpend * scale);
+  }
+  return lines.filter((r) => r.suggestedFromSafeToSpend > 0.005 || r.remainingBudget > 0);
+}
+
+function sumHardDueOnOrBefore(obligations: ForecastObligation[], boundary: Date): number {
+  const b = startOfDay(boundary).getTime();
+  return money(
+    obligations.filter((o) => o.isHardDue && startOfDay(o.dueDate).getTime() <= b).reduce((s, o) => s + o.amount, 0),
+  );
+}
+
 function dueRec(o: ForecastObligation, today: Date): PlannerDueItemRecommendation {
   const days = daysBetween(today, o.dueDate);
   return {
@@ -557,7 +640,10 @@ function buildTimeline(snapshot: PlannerSnapshot, paychecks: ForecastPaycheck[],
     const reserveNowList: PlannerReserveAllocationLine[] = obligations
       .filter((o) => o.dueDate.getTime() >= intervalEnd.getTime())
       .slice(0, 5)
-      .map((o) => ({ obligationId: o.id, sourceId: o.sourceId, label: o.label, amount: o.amount, dueDate: toIsoDate(o.dueDate), sourcePayDate: toIsoDate(p.date) }));
+      .map((o) => ({
+        obligationId: o.id, sourceId: o.sourceId, label: o.label, amount: o.amount, dueDate: toIsoDate(o.dueDate), sourcePayDate: toIsoDate(p.date),
+        reserveKind: o.sourceType,
+      }));
     const allocations: PlannerAllocationLine[] = [];
     if (essentialsNeeded > 0) {
       allocations.push({ label: "Essentials", bucket: "ESSENTIALS", amount: essentialsNeeded, rationale: "Daily living costs until next paycheck." });
@@ -597,40 +683,77 @@ function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
   const cash = totalCashAvailable(snapshot);
   const futureIncomeTotal = paychecks.reduce((s, p) => s + p.usableAmount, 0);
   const essentialsThroughHorizon = essentialsBetween(snapshot, today, horizon);
-  const hardDueTotal = obligations.filter((o) => o.isHardDue && o.dueDate.getTime() <= horizon.getTime()).reduce((s, o) => s + o.amount, 0);
-  const overdueTotal = obligations.filter((o) => o.dueDate.getTime() < today.getTime()).reduce((s, o) => s + o.amount, 0);
-  const protectedTotal = money(essentialsThroughHorizon + hardDueTotal + overdueTotal);
-
-  const safeToSpendNow = Math.max(0, money(cash + futureIncomeTotal - protectedTotal - safetyFloor));
-  const amountShort = Math.max(0, money(protectedTotal + safetyFloor - (cash + futureIncomeTotal)));
+  const hardDueHorizon = money(
+    obligations
+      .filter((o) => o.isHardDue && o.dueDate.getTime() <= horizon.getTime())
+      .reduce((s, o) => s + o.amount, 0),
+  );
+  const overdueTotal = money(
+    obligations.filter((o) => o.dueDate.getTime() < today.getTime()).reduce((s, o) => s + o.amount, 0),
+  );
+  const legacyProtectedTotal = money(essentialsThroughHorizon + hardDueHorizon);
 
   const nextPaycheck = paychecks[0] ?? null;
-  const nextPayDate = nextPaycheck?.date ?? null;
-
-  const overdueNow = obligations.filter((o) => o.dueDate.getTime() < today.getTime()).map((o) => dueRec(o, today));
-  const dueToday = obligations.filter((o) => o.dueDate.getTime() === today.getTime()).map((o) => dueRec(o, today));
-  const dueBeforeNextPaycheck = nextPayDate
-    ? obligations.filter((o) => o.dueDate.getTime() > today.getTime() && o.dueDate.getTime() <= nextPayDate.getTime()).map((o) => dueRec(o, today))
-    : [];
-  const dueSoonCutoff = addDays(today, DUE_SOON_WINDOW_DAYS);
-  const dueSoon = obligations.filter((o) => o.dueDate.getTime() > today.getTime() && o.dueDate.getTime() <= dueSoonCutoff.getTime()).map((o) => dueRec(o, today));
-
-  const whatMustBePaidNow = [...overdueNow, ...dueToday, ...dueBeforeNextPaycheck.filter((d) => d.riskLevel === "CRITICAL" || d.riskLevel === "HIGH")];
-  const whatCanBeDelayed = obligations.filter((o) => !o.isHardDue && o.dueDate.getTime() > today.getTime()).slice(0, 10).map((o) => dueRec(o, today));
+  const nextIncomeBoundary = nextPaycheck ? startOfDay(nextPaycheck.date) : horizon;
+  const intervalDaysUntilNextIncome = Math.max(1, daysBetween(today, nextIncomeBoundary));
+  const essentialsDueForCurrentInterval = nextPaycheck
+    ? essentialsBetween(snapshot, today, nextPaycheck.date)
+    : essentialsBetween(snapshot, today, horizon);
+  const hardDueBeforeNextIncome = sumHardDueOnOrBefore(obligations, nextIncomeBoundary);
 
   const timeline = buildTimeline(snapshot, paychecks, obligations);
-  const reservesHeld = timeline.flatMap((row) => row.reserveNowList ?? []).slice(0, 10);
+  const crossPaycheckReserveTotal = money(
+    (timeline[0]?.reserveNowList ?? []).reduce((s, r) => s + r.amount, 0),
+  );
+  const requiredCashNow = money(essentialsDueForCurrentInterval + hardDueBeforeNextIncome + crossPaycheckReserveTotal);
+
+  const safeToSpendNow = Math.max(0, money(cash - requiredCashNow - safetyFloor));
+  const amountShort = Math.max(0, money(requiredCashNow + safetyFloor - cash));
+  const safeToSpendAfterNextDeposit = nextPaycheck
+    ? Math.max(0, money(cash + nextPaycheck.usableAmount - requiredCashNow - safetyFloor))
+    : safeToSpendNow;
+
+  const nextPayDate = nextPaycheck?.date ?? null;
+
+  const overdueNow = obligations
+    .filter((o) => o.dueDate.getTime() < today.getTime())
+    .map((o) => dueRec(o, today));
+  const dueToday = obligations
+    .filter((o) => o.dueDate.getTime() === today.getTime())
+    .map((o) => dueRec(o, today));
+  const dueBeforeNextPaycheck = nextPayDate
+    ? obligations
+      .filter((o) =>
+        o.dueDate.getTime() > today.getTime() && o.dueDate.getTime() <= nextPayDate.getTime()
+      )
+      .map((o) => dueRec(o, today))
+    : [];
+  const dueSoonCutoff = addDays(today, DUE_SOON_WINDOW_DAYS);
+  const dueSoon = obligations
+    .filter((o) =>
+      o.dueDate.getTime() > today.getTime() && o.dueDate.getTime() <= dueSoonCutoff.getTime()
+    )
+    .map((o) => dueRec(o, today));
+
+  const whatMustBePaidNow = [
+    ...overdueNow,
+    ...dueToday,
+    ...dueBeforeNextPaycheck.filter((d) => d.riskLevel === "CRITICAL" || d.riskLevel === "HIGH"),
+  ];
+  const whatCanBeDelayed = obligations
+    .filter((o) => !o.isHardDue && o.dueDate.getTime() > today.getTime())
+    .slice(0, 10)
+    .map((o) => dueRec(o, today));
+
+  const reservesHeld = timeline.flatMap((row) => row.reserveNowList ?? []).slice(0, 12);
 
   const accountsById = new Map(snapshot.accounts.map((a) => [a.id, a]));
   const debtItems: PlannerDebtSummaryItem[] = [];
   let debtTotal = 0;
   for (const d of snapshot.debts) {
     const paid = paidSumByDebt(snapshot, d.id);
-    // When a debt is linked to a bank account (e.g. a credit card), let the live
-    // balance drive the debt so users do not update it manually anywhere.
-    const linkedId = d.bankAccountId?.trim();
-    const linked = linkedId ? accountsById.get(linkedId) : undefined;
-    const sourceBalance = linked ? Math.abs(linked.currentBalance) : d.currentBalance;
+    const liveBalance = liveBalanceForDebt(d, accountsById);
+    const sourceBalance = liveBalance ?? d.currentBalance;
     const bal = Math.max(0, money(sourceBalance - paid));
     debtTotal += bal;
     debtItems.push({ label: d.name, balanceLeft: bal });
@@ -642,21 +765,62 @@ function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
   const isOutOfDebt = debtTotal <= 0;
 
   const warnings: string[] = [];
-  if (snapshot.incomeSources.length === 0) warnings.push("No income sources yet. Add one under Accounts -> Income so the planner can forecast.");
-  if (snapshot.accounts.filter((a) => a.includeInPlanning).length === 0) warnings.push("No bank accounts are included in planning. Link a bank or toggle an account on.");
-  if (amountShort > 0) warnings.push(`Short by ${formatDollars(amountShort)} through next ${horizonDays} days at current plan.`);
-  if (overdueNow.length > 0) warnings.push(`${overdueNow.length} overdue obligation(s) rolling forward — handle before next paycheck.`);
+  if (snapshot.incomeSources.length === 0) {
+    warnings.push("No income sources yet. Add one under Accounts -> Income so the planner can forecast.");
+  }
+  if (snapshot.accounts.filter((a) => a.includeInPlanning).length === 0) {
+    warnings.push("No bank accounts are included in planning. Link a bank or toggle an account on.");
+  }
+  if (amountShort > 0) {
+    warnings.push(
+      nextPaycheck
+        ? `Wallet is short ${formatDollars(amountShort)} for essentials + hard dues + reserves before ${toIsoDate(nextPaycheck.date)} (safety buffer included).`
+        : `Wallet is short ${formatDollars(amountShort)} for the current planning checkpoint (safety buffer included).`,
+    );
+    if (nextPaycheck && safeToSpendAfterNextDeposit > 0 && safeToSpendNow <= 0) {
+      warnings.push(
+        `After your ${toIsoDate(nextPaycheck.date)} paycheck (~${formatDollars(nextPaycheck.usableAmount)}), estimated flexible headroom is ${formatDollars(safeToSpendAfterNextDeposit)} if nothing else changes.`,
+      );
+    }
+  }
+  if (overdueNow.length > 0) {
+    warnings.push(`${overdueNow.length} overdue obligation(s) rolling forward - handle before next paycheck.`);
+  }
 
   const nextBestActions: string[] = [];
-  if (whatMustBePaidNow.length > 0) nextBestActions.push(`Pay ${whatMustBePaidNow.length} critical item(s) before ${nextPayDate ? toIsoDate(nextPayDate) : "next paycheck"}.`);
-  if (snapshot.accounts.length === 0) nextBestActions.push("Connect a bank account to sync live balances.");
-  if (safeToSpendNow > 0) nextBestActions.push(`Safe to spend today: ${formatDollars(safeToSpendNow)}.`);
+  if (whatMustBePaidNow.length > 0) {
+    nextBestActions.push(
+      `Pay ${whatMustBePaidNow.length} critical item(s) before ${nextPayDate ? toIsoDate(nextPayDate) : "next paycheck"}.`,
+    );
+  }
+  if (snapshot.accounts.length === 0) {
+    nextBestActions.push("Connect a bank account to sync live balances.");
+  }
+  if (safeToSpendNow > 0) {
+    nextBestActions.push(`Safe to spend today: ${formatDollars(safeToSpendNow)}.`);
+  }
 
   const nextPaycheckNeed: PlannerNextPaycheckNeed = (() => {
-    if (!nextPaycheck) return { nextExpectedDate: null, payerLabel: null, minimumToSurvive: 0, targetToStayOnPlan: 0, idealToAccelerate: 0, warning: null, coverageSummary: "No upcoming paychecks detected." };
+    if (!nextPaycheck) {
+      return {
+        nextExpectedDate: null,
+        payerLabel: null,
+        minimumToSurvive: 0,
+        targetToStayOnPlan: 0,
+        idealToAccelerate: 0,
+        warning: null,
+        coverageSummary: "No upcoming paychecks detected.",
+      };
+    }
     const windowEnd = paychecks[1]?.date ?? addDays(nextPaycheck.date, 14);
     const essentials = essentialsBetween(snapshot, nextPaycheck.date, windowEnd);
-    const hardDue = obligations.filter((o) => o.isHardDue && o.dueDate.getTime() >= nextPaycheck.date.getTime() && o.dueDate.getTime() < windowEnd.getTime()).reduce((s, o) => s + o.amount, 0);
+    const hardDue = obligations
+      .filter((o) =>
+        o.isHardDue &&
+        o.dueDate.getTime() >= nextPaycheck.date.getTime() &&
+        o.dueDate.getTime() < windowEnd.getTime()
+      )
+      .reduce((s, o) => s + o.amount, 0);
     const survival = money(essentials + overdueTotal);
     const onPlan = money(essentials + hardDue);
     return {
@@ -665,62 +829,161 @@ function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
       minimumToSurvive: survival,
       targetToStayOnPlan: onPlan,
       idealToAccelerate: money(onPlan * 1.2),
-      warning: nextPaycheck.usableAmount < onPlan ? `Forecast paycheck (${formatDollars(nextPaycheck.usableAmount)}) is below on-plan target (${formatDollars(onPlan)}).` : null,
-      coverageSummary: `${formatDollars(nextPaycheck.usableAmount)} expected; ${formatDollars(onPlan)} needed to stay on plan.`,
+      warning: nextPaycheck.usableAmount < onPlan
+        ? `Forecast paycheck (${formatDollars(nextPaycheck.usableAmount)}) is below on-plan target (${formatDollars(onPlan)}).`
+        : null,
+      coverageSummary:
+        `${formatDollars(nextPaycheck.usableAmount)} expected; ${formatDollars(onPlan)} needed to stay on plan.`,
     };
   })();
 
-  const goalProgress: PlannerGoalProgress[] = snapshot.goals.filter((g) => g.isActive !== false).map((g) => {
-    const target = Math.max(g.targetAmount, 0.01);
-    const current = Math.max(0, g.currentAmount);
-    const remaining = Math.max(0, money(g.targetAmount - current));
-    const ratio = Math.min(1, money(current / target));
-    return { goalId: g.id, label: g.name, currentAmount: money(current), projectedAmount: money(current), targetAmount: money(g.targetAmount), remainingAmount: remaining, progressRatio: ratio };
-  });
+  const goalProgress: PlannerGoalProgress[] = snapshot.goals
+    .filter((g) => g.isActive !== false)
+    .map((g) => {
+      const target = Math.max(g.targetAmount, 0.01);
+      const current = Math.max(0, g.currentAmount);
+      const remaining = Math.max(0, money(g.targetAmount - current));
+      const ratio = Math.min(1, money(current / target));
+      return {
+        goalId: g.id,
+        label: g.name,
+        currentAmount: money(current),
+        projectedAmount: money(current),
+        targetAmount: money(g.targetAmount),
+        remainingAmount: remaining,
+        progressRatio: ratio,
+      };
+    });
 
   const nonPaydayObligations: PlannerNonPaydayObligation[] = obligations.map((o) => ({
-    obligationId: o.id, sourceId: o.sourceId, label: o.label, sourceType: o.sourceType,
-    date: toIsoDate(o.dueDate), originalDueDate: toIsoDate(o.dueDate), effectiveDueDate: toIsoDate(o.dueDate),
-    amount: o.amount, remainingAmount: o.amount,
+    obligationId: o.id,
+    sourceId: o.sourceId,
+    label: o.label,
+    sourceType: o.sourceType,
+    date: toIsoDate(o.dueDate),
+    originalDueDate: toIsoDate(o.dueDate),
+    effectiveDueDate: toIsoDate(o.dueDate),
+    amount: o.amount,
+    remainingAmount: o.amount,
     status: o.dueDate.getTime() < today.getTime() ? "OVERDUE" : "PLANNED",
     daysOverdue: o.dueDate.getTime() < today.getTime() ? daysBetween(o.dueDate, today) : 0,
   }));
 
   const catchUpAnalytics: PlannerCatchUpAnalytics[] = snapshot.debts.slice(0, 5).map((d) => ({
-    sourceId: d.id, label: d.name, projectedCatchUpDate: null, daysUntilCatchUp: null,
-    impactIfExtraMoneyAdded: d.currentBalance > 0 ? "Adding $50/pay period shortens payoff." : "Debt is current.",
+    sourceId: d.id,
+    label: d.name,
+    projectedCatchUpDate: null,
+    daysUntilCatchUp: null,
+    impactIfExtraMoneyAdded: d.currentBalance > 0
+      ? "Adding $50/pay period shortens payoff."
+      : "Debt is current.",
   }));
 
-  const scenarioSummaries: PlannerScenarioSummary[] = (["LOWEST_INCOME", "MOST_EFFICIENT", "HIGHEST_INCOME"] as PlannerScenarioMode[]).map((m) => {
-    const ps = forecastPaychecks(snapshot, m, today, addDays(today, 180));
-    const ti = ps.reduce((s, p) => s + p.usableAmount, 0);
-    return {
-      label: m === "LOWEST_INCOME" ? "Low" : m === "HIGHEST_INCOME" ? "High" : "Mid",
-      scenarioMode: m, isLiveCurrent: m === "MOST_EFFICIENT",
-      feasible: ti > 0, firstDateFullyCurrent: null, debtFreeDate: null,
-      totalBorrowingUsed: 0, totalRemainingOverdue: 0, endingFreeCash: money(ti),
+  const scenarioWalletSurplus = (m: PlannerScenarioMode): number => {
+    const ps = forecastPaychecks(snapshot, m, today, horizon);
+    const np = ps[0];
+    const eligible = money(cash + (np?.usableAmount ?? 0));
+    return money(eligible - requiredCashNow - safetyFloor);
+  };
+
+  const scenarioSummaries: PlannerScenarioSummary[] =
+    (["LOWEST_INCOME", "MOST_EFFICIENT", "HIGHEST_INCOME"] as PlannerScenarioMode[]).map((m) => {
+      const surplus = scenarioWalletSurplus(m);
+      return {
+        label: m === "LOWEST_INCOME" ? "Low" : m === "HIGHEST_INCOME" ? "High" : "Mid",
+        scenarioMode: m,
+        isLiveCurrent: m === "MOST_EFFICIENT",
+        feasible: surplus >= 0,
+        firstDateFullyCurrent: null,
+        debtFreeDate: null,
+        totalBorrowingUsed: 0,
+        totalRemainingOverdue: overdueTotal,
+        endingFreeCash: surplus,
+      };
+    });
+
+  const surLow = scenarioWalletSurplus("LOWEST_INCOME");
+  const surMid = scenarioWalletSurplus("MOST_EFFICIENT");
+  const surHigh = scenarioWalletSurplus("HIGHEST_INCOME");
+  if (surLow < 0 && surMid >= 0) {
+    warnings.push(
+      `Scenario check: Low income is short ${formatDollars(Math.abs(surLow))} before the next deposit; Mid (efficient) clears the checkpoint.`,
+    );
+  }
+  if (surMid < 0 && surHigh >= 0) {
+    warnings.push(
+      `Scenario check: Mid income is short ${formatDollars(Math.abs(surMid))}; High income clears the checkpoint.`,
+    );
+  }
+
+  const suggestedEssentialUse = buildSuggestedEssentialUse(
+    snapshot,
+    today,
+    intervalDaysUntilNextIncome,
+    safeToSpendNow,
+  );
+
+  let firstFailure: PlannerFirstFailure | null = null;
+  if (amountShort > 0) {
+    const label =
+      overdueNow[0]?.label ?? dueToday[0]?.label ?? whatMustBePaidNow[0]?.label ?? "Protected obligations";
+    firstFailure = {
+      date: toIsoDate(today),
+      obligationLabel: label,
+      shortage: amountShort,
+      minimumRepairHint: `Bring at least ${formatDollars(amountShort)} into checking (or reduce a bill) — then refresh the plan.`,
     };
-  });
+  }
+
+  const dashboard: PlannerDashboardOverview = {
+    overdueNow,
+    dueToday,
+    dueBeforeNextPaycheck,
+    reservesHeld,
+    protectedAmount: requiredCashNow,
+    safeToSpendNow,
+    amountShort,
+    nextBestActions,
+    intervalDaysUntilNextIncome,
+    nextReliableIncomeDate: nextPaycheck ? toIsoDate(nextPaycheck.date) : null,
+    essentialsDueForCurrentInterval,
+    hardDueBeforeNextIncome,
+    crossPaycheckReserveTotal,
+    requiredCashNow,
+    safeToSpendAfterNextDeposit,
+    suggestedEssentialUse,
+  };
 
   return {
     currentPaycheckCard: timeline[0] ?? null,
-    nextPaycheckNeed, timeline, whatMustBePaidNow, whatCanBeDelayed,
+    nextPaycheckNeed,
+    timeline,
+    whatMustBePaidNow,
+    whatCanBeDelayed,
     nonPaydayObligations,
     debtSummary: debtItems,
-    housingCurrentLeft: snapshot.housingBuckets.filter((b) => b.isCurrentBucket).reduce((s, b) => s + Math.max(0, money(b.amountDue - b.amountPaid)), 0),
-    housingArrearsLeft: snapshot.housingBuckets.filter((b) => !b.isCurrentBucket).reduce((s, b) => s + Math.max(0, money(b.amountDue - b.amountPaid)), 0),
+    housingCurrentLeft: snapshot.housingBuckets
+      .filter((b) => b.isCurrentBucket)
+      .reduce((s, b) => s + Math.max(0, money(b.amountDue - b.amountPaid)), 0),
+    housingArrearsLeft: snapshot.housingBuckets
+      .filter((b) => !b.isCurrentBucket)
+      .reduce((s, b) => s + Math.max(0, money(b.amountDue - b.amountPaid)), 0),
     dueSoon,
-    dashboard: { overdueNow, dueToday, dueBeforeNextPaycheck, reservesHeld, protectedAmount: protectedTotal, safeToSpendNow, amountShort, nextBestActions },
-    warnings, debtFreeDate: null, isOutOfDebt,
+    dashboard,
+    firstFailure,
+    warnings,
+    debtFreeDate: null,
+    isOutOfDebt,
     selectedScenarioMode: mode,
     availableScenarioModes: ["FIXED", "LOWEST_INCOME", "MOST_EFFICIENT", "HIGHEST_INCOME"],
-    scenarioSummaries, catchUpAnalytics,
+    scenarioSummaries,
+    catchUpAnalytics,
     safeExtraPayoffAmount: Math.max(0, money(safeToSpendNow - safetyFloor)),
     safeToSpendNow,
-    safeLiquidityNow: Math.max(0, money(cash - hardDueTotal - overdueTotal)),
-    protectedAmount: protectedTotal,
+    safeLiquidityNow: Math.max(0, money(cash - hardDueBeforeNextIncome)),
+    protectedAmount: requiredCashNow,
     goalProgress,
-    endingPlanningCash: money(cash + futureIncomeTotal - protectedTotal),
+    endingPlanningCash: money(cash + futureIncomeTotal - legacyProtectedTotal),
     liveOverdueRemainingTotal: overdueTotal,
     lastTrigger: "WEB_EDIT",
     lastRecalculatedAt: new Date().toISOString(),
