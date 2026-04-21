@@ -85,7 +85,7 @@ interface SnapshotIncomeSource { id: string; name: string; payerLabel?: string; 
 interface SnapshotPaycheck { id: string; incomeSourceId?: string | null; payerLabel?: string; date: string; amount: number; deposited?: boolean; accountId?: string | null }
 interface SnapshotBill { id: string; name: string; amountDue: number; minimumDue: number; currentAmountDue: number; recurringRule?: RecurringRule; category?: string; isEssential?: boolean; status?: "UPCOMING" | "DUE" | "PAID" | "OVERDUE" | "PARTIAL"; paymentPolicy?: "HARD_DUE" | "FLEXIBLE_DUE" }
 interface SnapshotBillPayment { id: string; billId: string; amount: number; paymentDate: string }
-interface SnapshotDebt { id: string; name: string; lender?: string; type?: string; currentBalance: number; minimumDue: number; requiredDueDate?: string | null; arrearsAmount?: number }
+interface SnapshotDebt { id: string; name: string; lender?: string; type?: string; currentBalance: number; minimumDue: number; requiredDueDate?: string | null; arrearsAmount?: number; bankAccountId?: string | null }
 interface SnapshotDebtTransaction { id: string; debtId: string; type: "PAYMENT" | "BORROW" | "REPAYMENT"; amount: number; eventDate: string }
 interface SnapshotRecurringExpense { id: string; name: string; amount: number; recurringRule: RecurringRule; isEssential?: boolean; isVariable?: boolean; allocationMode?: "EVENLY" | "MANUAL" | "ON_DUE_DATE"; oneTimeDate?: string | null; categoryLabel?: string }
 interface SnapshotExpenseSpend { id: string; expenseId: string; amount: number; spendDate: string }
@@ -621,11 +621,17 @@ function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
   const timeline = buildTimeline(snapshot, paychecks, obligations);
   const reservesHeld = timeline.flatMap((row) => row.reserveNowList ?? []).slice(0, 10);
 
+  const accountsById = new Map(snapshot.accounts.map((a) => [a.id, a]));
   const debtItems: PlannerDebtSummaryItem[] = [];
   let debtTotal = 0;
   for (const d of snapshot.debts) {
     const paid = paidSumByDebt(snapshot, d.id);
-    const bal = Math.max(0, money(d.currentBalance - paid));
+    // When a debt is linked to a bank account (e.g. a credit card), let the live
+    // balance drive the debt so users do not update it manually anywhere.
+    const linkedId = d.bankAccountId?.trim();
+    const linked = linkedId ? accountsById.get(linkedId) : undefined;
+    const sourceBalance = linked ? Math.abs(linked.currentBalance) : d.currentBalance;
+    const bal = Math.max(0, money(sourceBalance - paid));
     debtTotal += bal;
     debtItems.push({ label: d.name, balanceLeft: bal });
   }
@@ -820,6 +826,7 @@ async function loadPlannerSnapshot(client: SupabaseClient, userId: string): Prom
         currentBalance: numOr(r.current_balance, 0), minimumDue: numOr(r.minimum_due, 0),
         requiredDueDate: dateOr(r.required_due_date),
         arrearsAmount: numOr(r.arrears_amount, 0),
+        bankAccountId: r.bank_account_id ? String(r.bank_account_id) : null,
       };
     }),
     debtTransactions: (debtTransactions.data ?? []).map((raw) => {

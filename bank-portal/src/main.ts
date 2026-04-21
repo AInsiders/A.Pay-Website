@@ -27,6 +27,7 @@ import {
   deleteGoal,
   deleteIncomeSource,
   deleteRecurringExpense,
+  importLegacySnapshotIntoNormalized,
   loadPlannerSnapshot as loadNormalizedSnapshot,
   recomputeAndPersistPlan,
   saveBill,
@@ -37,8 +38,14 @@ import {
   savePlannerSettings,
   saveRecurringExpense,
   saveTransactionCategorization,
-  saveTransactionSplits,
+  linkTransactionToPlannerActual,
+  deleteTransactionLinkedActuals,
+  type PlannerActualTarget,
 } from "./planner-data";
+import {
+  normalizeTellerTransactions,
+  persistAutoCategorizedTransactions,
+} from "./transaction-autocategorize";
 
 /** Edge → Teller can be slow (cold start + bank API). Avoid client-side fetch aborting too early. */
 const TELLER_DATA_INVOKE_TIMEOUT_MS = 150_000;
@@ -320,6 +327,7 @@ function authEmailRedirectUrl(): string {
 }
 
 const THEME_PRESETS: { id: string; label: string; hex: string }[] = [
+  { id: "apay", label: "A.Pay cyan", hex: "#12C8FF" },
   { id: "mint", label: "Cash mint", hex: "#5ee7ff" },
   { id: "bullion", label: "Gold vault", hex: "#e8c547" },
   { id: "platinum", label: "Platinum", hex: "#c4b5fd" },
@@ -356,6 +364,8 @@ const state: {
   recoveryMode: boolean;
   /** Currently open form editor on Settings (bill/income/etc) or null. */
   settingsEditor: SettingsEditorState | null;
+  /** Currently open "adjust category" dialog for a synced bank transaction. */
+  categorizeEditor: { txId: string; description: string; merchant: string | null; amount: number; postedDate: string | null } | null;
 } = {
   session: null,
   profile: null,
@@ -379,6 +389,7 @@ const state: {
   authModalOpen: false,
   recoveryMode: false,
   settingsEditor: null,
+  categorizeEditor: null,
 };
 
 type SettingsEditorState =
@@ -395,7 +406,7 @@ const app = document.querySelector<HTMLDivElement>("#app")!;
 /** Cleans pointer/scroll listeners when leaving the guest landing view. */
 let landingParallaxTeardown: (() => void) | null = null;
 
-const DEFAULT_ACCENT = "#5ee7ff";
+const DEFAULT_ACCENT = "#12C8FF";
 
 function normalizeRouteId(v: string): RouteId {
   const raw = v.trim().toLowerCase();
@@ -705,6 +716,7 @@ async function refreshBankData() {
     const payload = data as { accounts?: unknown[]; error?: string };
     if (payload?.error) throw new Error(payload.error);
     state.accounts = payload.accounts ?? [];
+    await syncTellerAccountsToPlanner(state.accounts as Record<string, unknown>[]);
   } catch (e) {
     state.error = formatAuthError("Bank sync", e, { edgeFunction: "teller-data" });
     state.accounts = [];
@@ -719,6 +731,45 @@ async function refreshBankData() {
     state.selectedAccountId = first.id ?? null;
   }
   await loadTransactions();
+}
+
+/**
+ * Upsert Teller accounts into `bank_accounts` so the planner sees them and
+ * transactions can be auto-categorized against a known account. Best-effort;
+ * errors are logged but do not block bank data from rendering.
+ */
+async function syncTellerAccountsToPlanner(accounts: Record<string, unknown>[]): Promise<void> {
+  if (!state.session?.user?.id) return;
+  const userId = state.session.user.id;
+  for (const a of accounts) {
+    const id = String(a.id ?? "").trim();
+    if (!id) continue;
+    const inst = (a.institution ?? {}) as Record<string, unknown>;
+    const enrollmentId = a.enrollment_id ? String(a.enrollment_id) : null;
+    const row = {
+      user_id: userId,
+      id,
+      teller_enrollment_id: enrollmentId,
+      teller_linked_account_id: id,
+      institution_name: inst.name ? String(inst.name) : null,
+      name: String(a.name ?? "Account"),
+      type: String(a.type ?? "depository"),
+      subtype: a.subtype ? String(a.subtype) : null,
+      mask: a.last_four ? String(a.last_four) : null,
+      currency: String(a.currency ?? "USD"),
+      current_balance: typeof a.balance === "object" && a.balance && "available" in (a.balance as Record<string, unknown>)
+        ? Number((a.balance as Record<string, unknown>).available ?? 0)
+        : 0,
+      available_balance: typeof a.balance === "object" && a.balance && "available" in (a.balance as Record<string, unknown>)
+        ? Number((a.balance as Record<string, unknown>).available ?? 0)
+        : 0,
+      include_in_planning: true,
+      protected_from_payoff: false,
+      last_synced_at: new Date().toISOString(),
+    };
+    const { error } = await supabase.from("bank_accounts").upsert(row, { onConflict: "user_id,id" });
+    if (error) console.warn("bank_accounts upsert failed", error.message);
+  }
 }
 
 async function loadTransactions() {
@@ -742,12 +793,41 @@ async function loadTransactions() {
     const payload = data as { transactions?: unknown[]; error?: string };
     if (payload?.error) throw new Error(payload.error);
     state.transactions = payload.transactions ?? [];
+    await autoCategorizeTransactionsAndReplan(state.transactions as unknown[]);
   } catch (e) {
     state.error = formatAuthError("Transaction load", e, { edgeFunction: "teller-data" });
     state.transactions = [];
   } finally {
     state.busy = false;
     render();
+  }
+}
+
+/**
+ * Persist fetched Teller transactions into `bank_transactions`, run the
+ * deterministic auto-categorizer against the current planner snapshot, upsert
+ * `transaction_categorizations` and optional actuals (bill_payments, etc.),
+ * then recompute the plan so Home/Planner/Bills reflect them.
+ */
+async function autoCategorizeTransactionsAndReplan(rawTransactions: unknown[]): Promise<void> {
+  if (!state.session?.user?.id) return;
+  const userId = state.session.user.id;
+  if (!Array.isArray(rawTransactions) || rawTransactions.length === 0) return;
+  try {
+    const snapshot = state.normalizedSnapshot ?? (await loadNormalizedSnapshot(userId));
+    state.normalizedSnapshot = snapshot;
+    const normalized = normalizeTellerTransactions(
+      rawTransactions,
+      state.selectedAccountId ?? null,
+    );
+    if (normalized.length === 0) return;
+    const summary = await persistAutoCategorizedTransactions(userId, normalized, snapshot);
+    if (summary.saved > 0) {
+      state.info = `Auto-categorized ${summary.categorized}/${summary.saved} transactions (${summary.matched} confident, ${summary.asActuals} posted as planner actuals).`;
+      await loadNormalizedAndRecompute({ persist: true });
+    }
+  } catch (e) {
+    console.warn("auto-categorize failed", e);
   }
 }
 
@@ -797,18 +877,48 @@ async function loadNormalizedAndRecompute(options: { persist?: boolean } = { per
   state.normalizedSnapshotError = null;
   render();
   try {
+    // First load to see what's there.
+    let snapshot = await loadNormalizedSnapshot(userId);
+    const totalNormalized =
+      snapshot.bills.length +
+      snapshot.incomeSources.length +
+      snapshot.debts.length +
+      snapshot.expenses.length +
+      snapshot.goals.length +
+      snapshot.accounts.length +
+      snapshot.housingBuckets.length +
+      (snapshot.housingConfig ? 1 : 0);
+
+    // If normalized tables are empty but an Android snapshot exists on planner_snapshots,
+    // import it so the web app renders the same data.
+    if (totalNormalized === 0) {
+      const legacy = state.plannerSnapshot && typeof state.plannerSnapshot === "object"
+        ? (state.plannerSnapshot as Record<string, unknown>).snapshot as Record<string, unknown> | undefined
+        : undefined;
+      if (legacy && Object.keys(legacy).length > 0) {
+        try {
+          const result = await importLegacySnapshotIntoNormalized(userId, legacy);
+          if (result.importedEntities.length > 0) {
+            state.info = `Imported planner data from app: ${result.importedEntities.join(", ")}.`;
+            snapshot = await loadNormalizedSnapshot(userId);
+          }
+        } catch (e) {
+          console.warn("legacy snapshot import failed", e);
+        }
+      }
+    }
+
     if (options.persist) {
-      const { plan, snapshot } = await recomputeAndPersistPlan(userId);
-      state.normalizedSnapshot = snapshot;
+      const { plan, snapshot: finalSnapshot } = await recomputeAndPersistPlan(userId);
+      state.normalizedSnapshot = finalSnapshot;
       state.plannerSnapshot = {
         ...(typeof state.plannerSnapshot === "object" && state.plannerSnapshot ? state.plannerSnapshot : {}),
-        snapshot,
+        snapshot: finalSnapshot,
         plan,
         updated_at: new Date().toISOString(),
       };
       syncPlannerSnapshotDraft(true);
     } else {
-      const snapshot = await loadNormalizedSnapshot(userId);
       state.normalizedSnapshot = snapshot;
     }
   } catch (e) {
@@ -1641,14 +1751,36 @@ function renderSignedInInfoPage(route: RouteId) {
 }
 
 function renderAppHome(plannerState: PlannerStateRow | null, plan: PlannerPlan | null) {
+  const snap = state.normalizedSnapshot;
   if (!plan) {
-    return renderSetupStarter(
-      "Home",
-      "You have not added enough information yet",
-      "BillPayer needs your core money setup before it can show a real safe-to-spend amount here.",
-      "Sync the planner",
-      "Once those inputs exist on the same signed-in account, the latest planner snapshot will appear here automatically.",
-    );
+    const quickAdd = `
+      <section class="fx-panel fx-panel--highlight">
+        <p class="fx-eyebrow">Start here</p>
+        <h2>Add your money setup</h2>
+        <p class="muted">The planner needs these to show a real safe-to-spend amount. You can also edit them from Settings or the Android app.</p>
+        <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:10px">
+          <button type="button" data-settings-add="income">Add income source</button>
+          <button type="button" data-settings-add="bill">Add bill</button>
+          <button type="button" data-settings-add="debt" class="secondary">Add debt</button>
+          <button type="button" data-settings-add="expense" class="secondary">Add expense</button>
+          <button type="button" data-settings-add="goal" class="secondary">Add goal</button>
+          <button type="button" data-settings-add="housing" class="secondary">Set housing</button>
+        </div>
+        ${snap ? `<p class="muted" style="margin-top:12px">Currently on file: ${snap.incomeSources.length} income · ${snap.bills.length} bills · ${snap.debts.length} debts · ${snap.expenses.length} expenses · ${snap.goals.length} goals${snap.housingConfig ? " · housing set" : ""}.</p>` : ""}
+      </section>
+    `;
+    return `
+      <div class="fx-stack">
+        ${quickAdd}
+        ${renderSetupStarter(
+          "Home",
+          "You have not added enough information yet",
+          "A.Pay needs your core money setup before it can show a real safe-to-spend amount here.",
+          "Sync the planner",
+          "Once those inputs exist on the same signed-in account, the latest planner snapshot will appear here automatically.",
+        )}
+      </div>
+    `;
   }
 
   const safe = planSafeToSpend(plan);
@@ -1744,27 +1876,25 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
     : "";
 
   if (!plan) {
+    const snap = state.normalizedSnapshot;
+    const hasAny = snap && (snap.bills.length + snap.incomeSources.length + snap.debts.length + snap.expenses.length + snap.goals.length) > 0;
     return `
       <div class="fx-stack fx-stack--planner">
         ${loadErr}
-        ${renderSetupStarter(
-          "Planner",
-          "No planner guidance yet",
-          "This page fills in after you add your plan information and a planner snapshot exists for this signed-in account.",
-          "Reload when ready",
-          "Use Reload from Supabase after you add data in the app or finish syncing from the same account.",
-        )}
-        <section class="fx-panel">
-          <div class="fx-planner-head__row">
-            <div>
-              <p class="fx-eyebrow">Planner</p>
-              <h2>Reload latest snapshot</h2>
-              <p class="muted">When your planner data has been added and synced, reload here to pull the newest safe-to-spend, timeline, and guidance.</p>
-            </div>
-            <div class="fx-planner-head__actions">
-              <button type="button" class="secondary" id="btn-refresh-planner" ${syncDisabled ? "disabled" : ""}>${state.plannerSyncBusy ? "Loading…" : "Reload from Supabase"}</button>
-            </div>
+        <section class="fx-panel fx-panel--highlight">
+          <p class="fx-eyebrow">Planner</p>
+          <h2>${hasAny ? "Press recompute to generate a plan" : "You have not added enough information yet"}</h2>
+          <p class="muted">${hasAny
+            ? "You have planner inputs on file. Recompute builds timeline, safe-to-spend, and due lists from them."
+            : "Add at least one income source, some bills, and your housing info so the planner can forecast."}</p>
+          <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:10px">
+            <button type="button" id="btn-recompute-plan" ${state.normalizedSnapshotBusy ? "disabled" : ""}>${state.normalizedSnapshotBusy ? "Recomputing…" : "Recompute plan"}</button>
+            <button type="button" class="secondary" id="btn-refresh-planner" ${syncDisabled ? "disabled" : ""}>${state.plannerSyncBusy ? "Loading…" : "Reload from Supabase"}</button>
+            <button type="button" data-settings-add="income" class="secondary">Add income source</button>
+            <button type="button" data-settings-add="bill" class="secondary">Add bill</button>
+            <button type="button" data-settings-add="housing" class="secondary">Set housing</button>
           </div>
+          ${state.normalizedSnapshotError ? `<p class="error">${escapeHtml(state.normalizedSnapshotError)}</p>` : ""}
         </section>
       </div>
     `;
@@ -1792,6 +1922,7 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
             <p class="muted">Row updated <strong>${escapeHtml(plannerState?.updated_at ?? "—")}</strong> · platform <strong>${escapeHtml(plannerState?.source_platform ?? "unknown")}</strong> · schema <strong>${escapeHtml(plannerState?.planner_schema_version ?? "billpayer-shared-v1")}</strong></p>
           </div>
           <div class="fx-planner-head__actions">
+            <button type="button" id="btn-recompute-plan" ${state.normalizedSnapshotBusy ? "disabled" : ""}>${state.normalizedSnapshotBusy ? "Recomputing…" : "Recompute plan"}</button>
             <button type="button" class="secondary" id="btn-refresh-planner" ${syncDisabled ? "disabled" : ""}>${state.plannerSyncBusy ? "Syncing…" : "Reload from Supabase"}</button>
             <p class="muted">Engine recalc: <strong>${escapeHtml(plan.lastRecalculatedAt ?? plannerState?.source_updated_at ?? "—")}</strong></p>
           </div>
@@ -1938,49 +2069,77 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
 }
 
 function renderBillsWorkspace(plan: PlannerPlan | null) {
+  const snap = state.normalizedSnapshot;
+  const billRows = snap?.bills ?? [];
+  const addSection = `
+    <section class="fx-panel">
+      <div class="fx-planner-head__row">
+        <div>
+          <p class="fx-eyebrow">Bills</p>
+          <h2>Your bills</h2>
+          <p class="muted">The planner uses this list to protect cash before it becomes safe-to-spend.</p>
+        </div>
+        <div class="fx-planner-head__actions">
+          <button type="button" data-settings-add="bill">Add bill</button>
+        </div>
+      </div>
+      ${billRows.length
+        ? `<div class="fx-mini-list">${billRows.map(renderBillRow).join("")}</div>`
+        : `<p class="muted">No bills yet. Add Rent, Electricity, Phone, etc. so the planner can protect them.</p>`}
+    </section>
+  `;
+
   if (!plan) {
-    return renderSetupStarter(
-      "Bills",
-      "No bill guidance yet",
-      "Bill lists stay empty until your bills, income, and other planner inputs have been added for this account.",
-      "What will show up here",
-      "After setup, this page will show what must be paid now, what is due soon, and what can safely wait.",
-    );
+    return `
+      <div class="fx-stack">
+        ${addSection}
+        ${renderSetupStarter(
+          "Bills",
+          "Plan guidance unlocks after setup",
+          "Add bills above and income sources under Settings, then press Recompute plan to generate timeline and due lists.",
+          "What will show up here",
+          "After setup, this page will show what must be paid now, what is due soon, and what can safely wait.",
+        )}
+      </div>
+    `;
   }
 
   return `
-    <div class="fx-layout fx-layout--split">
-      <div class="fx-stack">
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Bills</p>
-          <h2>Must pay now</h2>
-          ${renderDueRecommendationList(plan.whatMustBePaidNow ?? [], "No must-pay items right now.")}
-        </section>
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Due soon</p>
-          <h2>Protected upcoming items</h2>
-          ${renderDueRecommendationList(plan.dueSoon ?? [], "Nothing urgent coming up.")}
-        </section>
-      </div>
-      <div class="fx-stack">
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Delay options</p>
-          <h2>What can wait</h2>
-          ${renderDueRecommendationList(plan.whatCanBeDelayed ?? [], "No delay candidates.")}
-        </section>
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Non-payday obligations</p>
-          <h2>Carry-forward + reserves</h2>
-          ${renderDueRecommendationList(
-            (plan.nonPaydayObligations ?? []).map((item) => ({
-              label: item.label,
-              amount: item.remainingAmount ?? item.amount,
-              dueDate: item.effectiveDueDate,
-              rationale: `${item.status ?? "PLANNED"}${item.daysOverdue ? ` · ${item.daysOverdue}d overdue` : ""}`,
-            })),
-            "No non-payday obligations queued.",
-          )}
-        </section>
+    <div class="fx-stack">
+      ${addSection}
+      <div class="fx-layout fx-layout--split">
+        <div class="fx-stack">
+          <section class="fx-panel">
+            <p class="fx-eyebrow">Bills</p>
+            <h2>Must pay now</h2>
+            ${renderDueRecommendationList(plan.whatMustBePaidNow ?? [], "No must-pay items right now.")}
+          </section>
+          <section class="fx-panel">
+            <p class="fx-eyebrow">Due soon</p>
+            <h2>Protected upcoming items</h2>
+            ${renderDueRecommendationList(plan.dueSoon ?? [], "Nothing urgent coming up.")}
+          </section>
+        </div>
+        <div class="fx-stack">
+          <section class="fx-panel">
+            <p class="fx-eyebrow">Delay options</p>
+            <h2>What can wait</h2>
+            ${renderDueRecommendationList(plan.whatCanBeDelayed ?? [], "No delay candidates.")}
+          </section>
+          <section class="fx-panel">
+            <p class="fx-eyebrow">Non-payday obligations</p>
+            <h2>Carry-forward + reserves</h2>
+            ${renderDueRecommendationList(
+              (plan.nonPaydayObligations ?? []).map((item) => ({
+                label: item.label,
+                amount: item.remainingAmount ?? item.amount,
+                dueDate: item.effectiveDueDate,
+                rationale: `${item.status ?? "PLANNED"}${item.daysOverdue ? ` · ${item.daysOverdue}d overdue` : ""}`,
+              })),
+              "No non-payday obligations queued.",
+            )}
+          </section>
+        </div>
       </div>
     </div>
   `;
@@ -2041,6 +2200,445 @@ function renderAccountsWorkspace(
             }
           </div>
         </section>
+      </div>
+    </div>
+  `;
+}
+
+// ========================================================================
+// Normalized snapshot CRUD renderers (bills/income/debts/expenses/goals)
+// ========================================================================
+
+function escapeAttr(s: unknown): string {
+  return escapeHtml(String(s ?? ""));
+}
+
+function ruleSummary(rule: { type?: string; anchorDate?: string; dayOfMonth?: number; intervalDays?: number } | null | undefined): string {
+  if (!rule?.type) return "Not scheduled";
+  const anchor = rule.anchorDate ? ` (anchor ${rule.anchorDate})` : "";
+  switch (rule.type) {
+    case "ONE_TIME": return `One-time${anchor}`;
+    case "DAILY": return `Daily${anchor}`;
+    case "WEEKLY": return `Weekly${anchor}`;
+    case "BIWEEKLY": return `Every 2 weeks${anchor}`;
+    case "MONTHLY": return `Monthly${rule.dayOfMonth ? ` on day ${rule.dayOfMonth}` : anchor}`;
+    case "SEMI_MONTHLY": return `Twice monthly${anchor}`;
+    case "QUARTERLY": return `Quarterly${anchor}`;
+    case "YEARLY": return `Yearly${anchor}`;
+    case "EVERY_X_DAYS": return `Every ${rule.intervalDays ?? 7} days${anchor}`;
+    case "CUSTOM_INTERVAL": return `Custom ${rule.intervalDays ?? 30} days${anchor}`;
+    default: return String(rule.type);
+  }
+}
+
+function renderCrudListSection(opts: {
+  title: string; eyebrow: string; description: string; addKind: SettingsEditorState["kind"];
+  items: string[]; emptyCopy: string;
+}) {
+  return `
+    <section class="fx-panel">
+      <div class="fx-planner-head__row">
+        <div>
+          <p class="fx-eyebrow">${escapeHtml(opts.eyebrow)}</p>
+          <h2>${escapeHtml(opts.title)}</h2>
+          <p class="muted">${escapeHtml(opts.description)}</p>
+        </div>
+        <div class="fx-planner-head__actions">
+          <button type="button" data-settings-add="${opts.addKind}" class="secondary">Add new</button>
+        </div>
+      </div>
+      ${opts.items.length
+        ? `<div class="fx-mini-list">${opts.items.join("")}</div>`
+        : `<p class="muted">${escapeHtml(opts.emptyCopy)}</p>`}
+    </section>
+  `;
+}
+
+function renderBillRow(bill: { id: string; name: string; amountDue: number; minimumDue: number; currentAmountDue: number; recurringRule?: { type?: string; anchorDate?: string; dayOfMonth?: number }; status?: string; paymentPolicy?: string }): string {
+  const next = ruleSummary(bill.recurringRule);
+  return `
+    <article class="fx-mini-list__item">
+      <div>
+        <strong>${escapeHtml(bill.name)}</strong>
+        <p>${money(bill.amountDue)} planned · min ${money(bill.minimumDue)} · ${escapeHtml(next)}${bill.currentAmountDue > 0 ? ` · ${money(bill.currentAmountDue)} due now` : ""}</p>
+      </div>
+      <div class="row">
+        <button type="button" class="secondary" data-settings-edit="bill" data-settings-id="${escapeAttr(bill.id)}">Edit</button>
+        <button type="button" class="secondary" data-settings-delete="bill" data-settings-id="${escapeAttr(bill.id)}">Remove</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderIncomeRow(src: { id: string; name: string; payerLabel?: string; amountRange: { minimum?: number; target?: number; maximum?: number }; recurringRule: { type?: string; anchorDate?: string; dayOfMonth?: number }; nextExpectedPayDate?: string | null; isActive?: boolean }): string {
+  const target = src.amountRange.target ?? src.amountRange.minimum ?? 0;
+  const active = src.isActive === false ? " · paused" : "";
+  const next = src.nextExpectedPayDate ? ` · next ${src.nextExpectedPayDate}` : "";
+  return `
+    <article class="fx-mini-list__item">
+      <div>
+        <strong>${escapeHtml(src.name)}</strong>
+        <p>${money(target)} ${escapeHtml(ruleSummary(src.recurringRule))}${escapeHtml(next)}${escapeHtml(active)}</p>
+      </div>
+      <div class="row">
+        <button type="button" class="secondary" data-settings-edit="income" data-settings-id="${escapeAttr(src.id)}">Edit</button>
+        <button type="button" class="secondary" data-settings-delete="income" data-settings-id="${escapeAttr(src.id)}">Remove</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderDebtRow(d: { id: string; name: string; lender?: string; currentBalance: number; minimumDue: number; requiredDueDate?: string | null }): string {
+  return `
+    <article class="fx-mini-list__item">
+      <div>
+        <strong>${escapeHtml(d.name)}${d.lender ? ` — ${escapeHtml(d.lender)}` : ""}</strong>
+        <p>Balance ${money(d.currentBalance)} · min ${money(d.minimumDue)}${d.requiredDueDate ? ` · due ${d.requiredDueDate}` : ""}</p>
+      </div>
+      <div class="row">
+        <button type="button" class="secondary" data-settings-edit="debt" data-settings-id="${escapeAttr(d.id)}">Edit</button>
+        <button type="button" class="secondary" data-settings-delete="debt" data-settings-id="${escapeAttr(d.id)}">Remove</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderExpenseRow(e: { id: string; name: string; amount: number; recurringRule: { type?: string; anchorDate?: string; dayOfMonth?: number }; isEssential?: boolean; categoryLabel?: string }): string {
+  return `
+    <article class="fx-mini-list__item">
+      <div>
+        <strong>${escapeHtml(e.name)}</strong>
+        <p>${money(e.amount)} · ${escapeHtml(ruleSummary(e.recurringRule))} · ${e.isEssential ? "Essential" : "Optional"}${e.categoryLabel ? ` · ${escapeHtml(e.categoryLabel)}` : ""}</p>
+      </div>
+      <div class="row">
+        <button type="button" class="secondary" data-settings-edit="expense" data-settings-id="${escapeAttr(e.id)}">Edit</button>
+        <button type="button" class="secondary" data-settings-delete="expense" data-settings-id="${escapeAttr(e.id)}">Remove</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderGoalRow(g: { id: string; name: string; targetAmount: number; currentAmount: number; isActive?: boolean }): string {
+  const ratio = g.targetAmount > 0 ? Math.min(1, Math.max(0, g.currentAmount / g.targetAmount)) : 0;
+  return `
+    <article class="fx-mini-list__item">
+      <div>
+        <strong>${escapeHtml(g.name)}</strong>
+        <p>${money(g.currentAmount)} of ${money(g.targetAmount)} · ${Math.round(ratio * 100)}%${g.isActive === false ? " · paused" : ""}</p>
+      </div>
+      <div class="row">
+        <button type="button" class="secondary" data-settings-edit="goal" data-settings-id="${escapeAttr(g.id)}">Edit</button>
+        <button type="button" class="secondary" data-settings-delete="goal" data-settings-id="${escapeAttr(g.id)}">Remove</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderNormalizedSettings(snap: PlannerSnapshot | null): string {
+  if (!snap) {
+    return `
+      <section class="fx-panel fx-panel--highlight">
+        <p class="fx-eyebrow">Loading</p>
+        <h2>Pulling your planner data…</h2>
+        <p class="muted">If this hangs, make sure the latest Supabase migrations (including <code>20260423000000_planner_data_model.sql</code>) have been applied.</p>
+      </section>
+    `;
+  }
+  const bills = renderCrudListSection({
+    eyebrow: "Setup",
+    title: "Bills",
+    description: "Hard dues, subscriptions, and recurring amounts. The planner protects these before safe-to-spend.",
+    addKind: "bill",
+    items: snap.bills.map(renderBillRow),
+    emptyCopy: "No bills yet. Add Electricity, Rent, Phone, etc. to start protecting money for them.",
+  });
+  const income = renderCrudListSection({
+    eyebrow: "Setup",
+    title: "Income sources",
+    description: "Paychecks and other recurring income that fund the plan.",
+    addKind: "income",
+    items: snap.incomeSources.map(renderIncomeRow),
+    emptyCopy: "Add at least one income source so the planner can forecast future paychecks.",
+  });
+  const debts = renderCrudListSection({
+    eyebrow: "Setup",
+    title: "Debts",
+    description: "Balances and minimums we must protect with cash or paychecks.",
+    addKind: "debt",
+    items: snap.debts.map(renderDebtRow),
+    emptyCopy: "No debts recorded. Add credit cards, loans, or other balances you owe.",
+  });
+  const expenses = renderCrudListSection({
+    eyebrow: "Setup",
+    title: "Recurring expenses",
+    description: "Essential and optional recurring spending like gas, groceries, and services.",
+    addKind: "expense",
+    items: snap.expenses.map(renderExpenseRow),
+    emptyCopy: "Add groceries, gas, internet, etc. Mark the ones that must stay funded.",
+  });
+  const goals = renderCrudListSection({
+    eyebrow: "Planning",
+    title: "Goals",
+    description: "Targets that fund from truly free cash without breaking protected bills.",
+    addKind: "goal",
+    items: snap.goals.map(renderGoalRow),
+    emptyCopy: "No goals yet. Add savings targets to direct extra cash once the plan is fully funded.",
+  });
+
+  const hc = snap.housingConfig;
+  const housing = `
+    <section class="fx-panel">
+      <div class="fx-planner-head__row">
+        <div>
+          <p class="fx-eyebrow">Setup</p>
+          <h2>Housing</h2>
+          <p class="muted">Rent or mortgage payment and arrears buckets.</p>
+        </div>
+        <div class="fx-planner-head__actions">
+          <button type="button" data-settings-add="housing" class="secondary">Edit housing</button>
+        </div>
+      </div>
+      ${hc
+        ? `<div class="fx-mini-list">
+            <article class="fx-mini-list__item">
+              <div><strong>Current payment</strong><p>${money(hc.currentMonthlyRent)} due day ${hc.rentDueDay} · min ${money(hc.minimumAcceptablePayment)} · ${escapeHtml(hc.arrangement ?? "RENT_MONTH_TO_MONTH")}</p></div>
+            </article>
+          </div>`
+        : `<p class="muted">No housing setup yet. Add rent, mortgage, or arrangement details to protect it.</p>`
+      }
+      ${snap.housingBuckets.length > 0
+        ? `<div class="fx-mini-list">${snap.housingBuckets.map((b) => `
+            <article class="fx-mini-list__item">
+              <div>
+                <strong>${escapeHtml(b.label)}</strong>
+                <p>${money(b.amountDue)} due · ${money(b.amountPaid)} paid · ${money(Math.max(0, b.amountDue - b.amountPaid))} left${b.dueDate ? ` · due ${escapeHtml(b.dueDate)}` : ""}</p>
+              </div>
+            </article>
+          `).join("")}</div>`
+        : ""}
+    </section>
+  `;
+
+  const plannerSettings = `
+    <section class="fx-panel">
+      <div class="fx-planner-head__row">
+        <div>
+          <p class="fx-eyebrow">Planning</p>
+          <h2>Planner preferences</h2>
+          <p class="muted">Scenario mode, horizon window, and safety buffer.</p>
+        </div>
+        <div class="fx-planner-head__actions">
+          <button type="button" data-settings-add="planner-settings" class="secondary">Edit preferences</button>
+        </div>
+      </div>
+      <div class="fx-mini-list">
+        <article class="fx-mini-list__item"><div><strong>Scenario</strong><p>${escapeHtml(snap.settings.selectedScenarioMode ?? "FIXED")}</p></div></article>
+        <article class="fx-mini-list__item"><div><strong>Horizon</strong><p>${snap.settings.horizonDays ?? 120} days forecast</p></div></article>
+        <article class="fx-mini-list__item"><div><strong>Safety buffer</strong><p>${money(snap.settings.targetBuffer ?? 0)}</p></div></article>
+        <article class="fx-mini-list__item"><div><strong>Style</strong><p>${escapeHtml(snap.settings.planningStyle ?? "BALANCED")}</p></div></article>
+      </div>
+    </section>
+  `;
+
+  return `${bills}${income}${debts}${expenses}${goals}${housing}${plannerSettings}`;
+}
+
+// ========================================================================
+// Editor dialogs (rendered as an overlay when state.settingsEditor is set)
+// ========================================================================
+
+function renderEditorFooterButtons(busy: boolean, deletable: boolean): string {
+  return `
+    <div class="row" style="justify-content:space-between;margin-top:12px">
+      <div class="row">
+        ${deletable ? `<button type="button" class="secondary" data-settings-editor-delete>Delete</button>` : ""}
+      </div>
+      <div class="row">
+        <button type="button" class="secondary" data-settings-editor-cancel>Cancel</button>
+        <button type="submit" ${busy ? "disabled" : ""}>Save</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderRecurringRuleFields(prefix: string, rule?: { type?: string; anchorDate?: string; dayOfMonth?: number; intervalDays?: number }): string {
+  const r = rule ?? {};
+  const opts = ["ONE_TIME", "DAILY", "WEEKLY", "BIWEEKLY", "SEMI_MONTHLY", "MONTHLY", "QUARTERLY", "YEARLY", "EVERY_X_DAYS"];
+  return `
+    <div class="field">
+      <span style="font-weight:600">Repeats</span>
+      <select name="${prefix}_type">
+        ${opts.map((o) => `<option value="${o}"${r.type === o ? " selected" : ""}>${o.toLowerCase().replace(/_/g, " ")}</option>`).join("")}
+      </select>
+    </div>
+    <label class="field">Anchor date<input type="date" name="${prefix}_anchor" value="${escapeAttr(r.anchorDate ?? "")}" /></label>
+    <label class="field">Day of month (for monthly)<input type="number" name="${prefix}_dayOfMonth" min="1" max="31" value="${escapeAttr(r.dayOfMonth ?? "")}" /></label>
+    <label class="field">Interval days (for every-x-days)<input type="number" name="${prefix}_intervalDays" min="1" value="${escapeAttr(r.intervalDays ?? "")}" /></label>
+  `;
+}
+
+function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
+  const editor = state.settingsEditor;
+  if (!editor) return "";
+  if (!snap && editor.kind !== "housing" && editor.kind !== "planner-settings") return "";
+
+  const busy = state.normalizedSnapshotBusy;
+  const find = <T extends { id: string }>(arr: T[] | undefined, id?: string) => arr?.find((x) => x.id === id);
+
+  let title = "Editor";
+  let body = "";
+  let deletable = false;
+
+  switch (editor.kind) {
+    case "bill": {
+      const existing = snap && editor.id ? find(snap.bills, editor.id) : undefined;
+      deletable = Boolean(existing);
+      title = existing ? `Edit bill — ${existing.name}` : "Add bill";
+      body = `
+        <label class="field">Name<input name="name" required value="${escapeAttr(existing?.name ?? "")}" /></label>
+        <label class="field">Amount due next cycle<input name="amountDue" type="number" step="0.01" required value="${escapeAttr(existing?.amountDue ?? "")}" /></label>
+        <label class="field">Minimum due<input name="minimumDue" type="number" step="0.01" value="${escapeAttr(existing?.minimumDue ?? 0)}" /></label>
+        <label class="field">Amount currently due<input name="currentAmountDue" type="number" step="0.01" value="${escapeAttr(existing?.currentAmountDue ?? 0)}" /></label>
+        <label class="field">Category<input name="category" value="${escapeAttr(existing?.category ?? "")}" /></label>
+        <div class="field">
+          <span style="font-weight:600">Policy</span>
+          <select name="paymentPolicy">
+            <option value="HARD_DUE"${(existing?.paymentPolicy ?? "HARD_DUE") === "HARD_DUE" ? " selected" : ""}>Hard due date (must pay on time)</option>
+            <option value="FLEXIBLE_DUE"${existing?.paymentPolicy === "FLEXIBLE_DUE" ? " selected" : ""}>Flexible (can be delayed)</option>
+          </select>
+        </div>
+        <label class="field"><input name="isEssential" type="checkbox"${existing?.isEssential ? " checked" : ""}/> Essential (never delay)</label>
+        ${renderRecurringRuleFields("rule", existing?.recurringRule)}
+      `;
+      break;
+    }
+    case "income": {
+      const existing = snap && editor.id ? find(snap.incomeSources, editor.id) : undefined;
+      deletable = Boolean(existing);
+      title = existing ? `Edit income — ${existing.name}` : "Add income source";
+      body = `
+        <label class="field">Source name<input name="name" required value="${escapeAttr(existing?.name ?? "")}" /></label>
+        <label class="field">Payer label (company)<input name="payerLabel" value="${escapeAttr(existing?.payerLabel ?? "")}" /></label>
+        <label class="field">Target usable amount<input name="target" type="number" step="0.01" required value="${escapeAttr(existing?.amountRange.target ?? "")}" /></label>
+        <label class="field">Minimum (low scenario)<input name="minimum" type="number" step="0.01" value="${escapeAttr(existing?.amountRange.minimum ?? "")}" /></label>
+        <label class="field">Maximum (high scenario)<input name="maximum" type="number" step="0.01" value="${escapeAttr(existing?.amountRange.maximum ?? "")}" /></label>
+        <label class="field">Next expected pay date<input type="date" name="nextExpectedPayDate" value="${escapeAttr(existing?.nextExpectedPayDate ?? "")}" /></label>
+        <label class="field"><input name="isActive" type="checkbox"${existing?.isActive !== false ? " checked" : ""}/> Active</label>
+        ${renderRecurringRuleFields("rule", existing?.recurringRule)}
+      `;
+      break;
+    }
+    case "debt": {
+      const existing = snap && editor.id ? find(snap.debts, editor.id) : undefined;
+      deletable = Boolean(existing);
+      title = existing ? `Edit debt — ${existing.name}` : "Add debt";
+      const linkedAccount = existing?.bankAccountId
+        ? snap?.accounts.find((a) => a.id === existing.bankAccountId) ?? null
+        : null;
+      const liveBalanceLabel = linkedAccount
+        ? `$${Math.abs(linkedAccount.currentBalance).toFixed(2)} live from ${linkedAccount.name}`
+        : null;
+      const accountOptions = (snap?.accounts ?? []).map((a) => {
+        const sel = existing?.bankAccountId === a.id ? " selected" : "";
+        return `<option value="${escapeAttr(a.id)}"${sel}>${escapeHtml(a.name)} — $${Math.abs(a.currentBalance).toFixed(2)}</option>`;
+      }).join("");
+      body = `
+        <label class="field">Name<input name="name" required value="${escapeAttr(existing?.name ?? "")}" /></label>
+        <label class="field">Lender<input name="lender" value="${escapeAttr(existing?.lender ?? "")}" /></label>
+        <div class="field">
+          <span style="font-weight:600">Linked bank account (optional)</span>
+          <select name="bankAccountId">
+            <option value="">— none (enter balance manually below) —</option>
+            ${accountOptions}
+          </select>
+          <span class="muted">Pick the credit card or loan account so its live balance drives this debt. Pay-down transactions already show on your bank statement — they do not get added manually here.</span>
+        </div>
+        ${liveBalanceLabel
+          ? `<label class="field">Current balance (from bank)<input type="text" value="${escapeAttr(liveBalanceLabel)}" disabled /><span class="muted">Live value from your linked bank account. Manual balance field below is ignored while linked.</span></label>`
+          : `<label class="field">Current balance (manual)<input name="currentBalance" type="number" step="0.01" required value="${escapeAttr(existing?.currentBalance ?? 0)}" /><span class="muted">Only used when no bank account is linked.</span></label>`}
+        <input type="hidden" name="currentBalanceFallback" value="${escapeAttr(existing?.currentBalance ?? 0)}" />
+        <label class="field">Minimum payment<input name="minimumDue" type="number" step="0.01" value="${escapeAttr(existing?.minimumDue ?? 0)}" /></label>
+        <label class="field">Next required due date<input name="requiredDueDate" type="date" value="${escapeAttr(existing?.requiredDueDate ?? "")}" /></label>
+        <div class="field">
+          <span style="font-weight:600">Type</span>
+          <select name="type">
+            ${["INSTALLMENT", "REVOLVING", "CREDIT_CARD", "LOAN", "BORROW"].map((t) => `<option value="${t}"${(existing?.type ?? "INSTALLMENT") === t ? " selected" : ""}>${t}</option>`).join("")}
+          </select>
+        </div>
+      `;
+      break;
+    }
+    case "expense": {
+      const existing = snap && editor.id ? find(snap.expenses, editor.id) : undefined;
+      deletable = Boolean(existing);
+      title = existing ? `Edit expense — ${existing.name}` : "Add recurring expense";
+      body = `
+        <label class="field">Name<input name="name" required value="${escapeAttr(existing?.name ?? "")}" /></label>
+        <label class="field">Typical amount<input name="amount" type="number" step="0.01" required value="${escapeAttr(existing?.amount ?? "")}" /></label>
+        <label class="field">Category label<input name="categoryLabel" value="${escapeAttr(existing?.categoryLabel ?? "")}" /></label>
+        <label class="field"><input name="isEssential" type="checkbox"${existing?.isEssential !== false ? " checked" : ""}/> Essential</label>
+        ${renderRecurringRuleFields("rule", existing?.recurringRule)}
+      `;
+      break;
+    }
+    case "goal": {
+      const existing = snap && editor.id ? find(snap.goals, editor.id) : undefined;
+      deletable = Boolean(existing);
+      title = existing ? `Edit goal — ${existing.name}` : "Add goal";
+      body = `
+        <label class="field">Goal name<input name="name" required value="${escapeAttr(existing?.name ?? "")}" /></label>
+        <label class="field">Target amount<input name="targetAmount" type="number" step="0.01" required value="${escapeAttr(existing?.targetAmount ?? "")}" /></label>
+        <label class="field">Current progress<input name="currentAmount" type="number" step="0.01" value="${escapeAttr(existing?.currentAmount ?? 0)}" /></label>
+        <label class="field"><input name="isActive" type="checkbox"${existing?.isActive !== false ? " checked" : ""}/> Active</label>
+      `;
+      break;
+    }
+    case "housing": {
+      const existing = snap?.housingConfig;
+      title = existing ? "Edit housing" : "Add housing";
+      body = `
+        <label class="field">Current monthly rent / mortgage<input name="currentMonthlyRent" type="number" step="0.01" required value="${escapeAttr(existing?.currentMonthlyRent ?? "")}" /></label>
+        <label class="field">Minimum acceptable payment<input name="minimumAcceptablePayment" type="number" step="0.01" value="${escapeAttr(existing?.minimumAcceptablePayment ?? 0)}" /></label>
+        <label class="field">Due day (1–31)<input name="rentDueDay" type="number" min="1" max="31" value="${escapeAttr(existing?.rentDueDay ?? 1)}" /></label>
+        <div class="field">
+          <span style="font-weight:600">Arrangement</span>
+          <select name="arrangement">
+            ${["RENT_MONTH_TO_MONTH", "RENT_LEASE", "MORTGAGE", "LAND_CONTRACT", "OTHER"].map((t) => `<option value="${t}"${(existing?.arrangement ?? "RENT_MONTH_TO_MONTH") === t ? " selected" : ""}>${t.toLowerCase().replace(/_/g, " ")}</option>`).join("")}
+          </select>
+        </div>
+      `;
+      break;
+    }
+    case "planner-settings": {
+      const s = snap?.settings ?? { targetBuffer: 0, horizonDays: 120, selectedScenarioMode: "FIXED", planningStyle: "BALANCED" };
+      title = "Planner preferences";
+      body = `
+        <label class="field">Safety buffer cash<input name="targetBuffer" type="number" step="0.01" value="${escapeAttr(s.targetBuffer ?? 0)}" /></label>
+        <label class="field">Horizon days<input name="horizonDays" type="number" min="30" max="365" value="${escapeAttr(s.horizonDays ?? 120)}" /></label>
+        <div class="field">
+          <span style="font-weight:600">Scenario mode</span>
+          <select name="selectedScenarioMode">
+            ${(["FIXED", "LOWEST_INCOME", "MOST_EFFICIENT", "HIGHEST_INCOME"] as const).map((m) => `<option value="${m}"${s.selectedScenarioMode === m ? " selected" : ""}>${m.toLowerCase().replace(/_/g, " ")}</option>`).join("")}
+          </select>
+        </div>
+      `;
+      break;
+    }
+  }
+
+  return `
+    <div class="fx-auth-modal fx-auth-modal--open" role="dialog" aria-modal="true" aria-labelledby="settings-editor-title">
+      <button type="button" class="fx-auth-modal__backdrop" data-settings-editor-cancel aria-label="Close"></button>
+      <div class="fx-auth-modal__panel" style="max-width:620px">
+        <div class="fx-auth-modal__chrome">
+          <h2 id="settings-editor-title" class="fx-auth-modal__title">${escapeHtml(title)}</h2>
+          <button type="button" class="fx-auth-modal__close" data-settings-editor-cancel aria-label="Close">×</button>
+        </div>
+        <form id="form-settings-editor" class="fx-auth-modal__form list" data-editor-kind="${editor.kind}" data-editor-id="${escapeAttr((editor as { id?: string }).id ?? "")}">
+          ${body}
+          ${renderEditorFooterButtons(busy, deletable)}
+          ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
+        </form>
       </div>
     </div>
   `;
@@ -2111,11 +2709,21 @@ function renderSettingsWorkspace(
             <li>App version: <strong>${escapeHtml(plannerState?.source_app_version ?? "unknown")}</strong></li>
             <li>Source updated: <strong>${escapeHtml(plannerState?.source_updated_at ?? plannerState?.updated_at ?? "—")}</strong></li>
           </div>
-          <p class="muted">The website should render the same planner output the BillPayer shared engine already computed, instead of inventing parallel math here.</p>
+          <p class="muted">The website and the Android app both read and write this same row. Edits here recompute via the shared engine and sync back to the app.</p>
+          <div class="row" style="margin-top:12px">
+            <button type="button" id="btn-recompute-plan" ${state.normalizedSnapshotBusy ? "disabled" : ""}>${state.normalizedSnapshotBusy ? "Recomputing…" : "Recompute plan"}</button>
+          </div>
+          ${state.normalizedSnapshotError ? `<p class="error">${escapeHtml(state.normalizedSnapshotError)}</p>` : ""}
         </section>
       </div>
     </div>
-    ${renderSetupGroups(WEB_SETTINGS_GROUPS)}
+
+    ${renderNormalizedSettings(state.normalizedSnapshot)}
+
+    <details class="fx-panel" style="margin-top:12px">
+      <summary style="cursor:pointer"><strong>Advanced: edit planner snapshot JSON</strong></summary>
+      <p class="muted" style="margin-top:8px">For power users and data migration. The friendly forms above are the recommended way to edit.</p>
+      ${renderSetupGroups(WEB_SETTINGS_GROUPS)}
     <form id="form-planner-sections" class="fx-stack">
       <section class="fx-panel fx-panel--highlight">
         <p class="fx-eyebrow">Web setup editor</p>
@@ -2197,6 +2805,7 @@ function renderSettingsWorkspace(
       </label>
       ${state.plannerSnapshotSaveError ? `<p class="error">${escapeHtml(state.plannerSnapshotSaveError)}</p>` : ""}
     </section>
+    </details>
   `;
 }
 
@@ -2224,15 +2833,20 @@ function renderApp() {
     const amt = t.amount as number | string | undefined;
     const date = String(t.date ?? t.running_balance_at ?? "");
     const desc = String(t.description ?? "Transaction");
+    const txId = String(t.id ?? "");
+    const merchant = t.details && typeof t.details === "object" && "counterparty" in (t.details as Record<string, unknown>)
+      ? String(((t.details as Record<string, unknown>).counterparty as Record<string, unknown>)?.name ?? "")
+      : "";
     const n = typeof amt === "number" ? amt : Number(amt);
     const cls = n >= 0 ? "amt-pos" : "amt-neg";
     return `
       <div class="tx">
-        <div>
+        <div class="tx-main">
           <div class="tx-title">${escapeHtml(desc)}</div>
           <div class="tx-date">${escapeHtml(date)}</div>
         </div>
         <div class="${cls}">${money(n)}</div>
+        <button type="button" class="secondary tx-adjust" data-categorize-tx="${escapeAttr(txId)}" data-categorize-desc="${escapeAttr(desc)}" data-categorize-merchant="${escapeAttr(merchant)}" data-categorize-amount="${escapeAttr(n)}" data-categorize-date="${escapeAttr(date)}" title="Adjust category or link to a bill/debt/expense">Adjust</button>
       </div>
     `;
   });
@@ -2299,6 +2913,76 @@ function renderApp() {
           <a href="#/terms">Terms</a>
           <span>Planner truth: BillPayer shared engine · Backend truth: Supabase</span>
         </footer>
+      </div>
+      ${renderSettingsEditorOverlay(state.normalizedSnapshot)}
+      ${renderCategorizeOverlay(state.normalizedSnapshot)}
+    </div>
+  `;
+}
+
+function renderCategorizeOverlay(snap: PlannerSnapshot | null): string {
+  const c = state.categorizeEditor;
+  if (!c) return "";
+  const busy = state.normalizedSnapshotBusy;
+  const amountLabel = money(c.amount);
+  const isCredit = c.amount > 0;
+  const billOpts = (snap?.bills ?? []).map((b) =>
+    `<option value="BILL:${escapeAttr(b.id)}">Bill · ${escapeHtml(b.name)}</option>`
+  ).join("");
+  const debtOpts = (snap?.debts ?? []).map((d) =>
+    `<option value="DEBT:${escapeAttr(d.id)}">Debt · ${escapeHtml(d.name)}</option>`
+  ).join("");
+  const expenseOpts = (snap?.expenses ?? []).map((e) =>
+    `<option value="EXPENSE:${escapeAttr(e.id)}">Expense · ${escapeHtml(e.name)}</option>`
+  ).join("");
+  const housingOpts = (snap?.housingBuckets ?? []).map((h) =>
+    `<option value="HOUSING:${escapeAttr(h.id)}">Housing · ${escapeHtml(h.label)}</option>`
+  ).join("");
+  const goalOpts = (snap?.goals ?? []).map((g) =>
+    `<option value="GOAL:${escapeAttr(g.id)}">Goal · ${escapeHtml(g.name)}</option>`
+  ).join("");
+  const cashOpts = isCredit
+    ? `<option value="CASH_IN:">Cash in (untracked deposit)</option>`
+    : `<option value="CASH_OUT:">Cash out (untracked spend)</option>`;
+  return `
+    <div class="fx-auth-modal fx-auth-modal--open" role="dialog" aria-modal="true" aria-labelledby="categorize-title">
+      <button type="button" class="fx-auth-modal__backdrop" data-categorize-cancel aria-label="Close"></button>
+      <div class="fx-auth-modal__panel" style="max-width:620px">
+        <div class="fx-auth-modal__chrome">
+          <h2 id="categorize-title" class="fx-auth-modal__title">Adjust this transaction</h2>
+          <button type="button" class="fx-auth-modal__close" data-categorize-cancel aria-label="Close">×</button>
+        </div>
+        <form id="form-categorize" class="fx-auth-modal__form list" data-tx-id="${escapeAttr(c.txId)}" data-tx-desc="${escapeAttr(c.description)}" data-tx-merchant="${escapeAttr(c.merchant ?? "")}" data-tx-amount="${escapeAttr(c.amount)}" data-tx-date="${escapeAttr(c.postedDate ?? "")}">
+          <p class="muted" style="margin:0 0 4px">This updates how the planner treats a transaction that came from your bank sync. It does <strong>not</strong> create a transaction — only your bank can do that.</p>
+          <div class="fx-mini-list" style="margin:8px 0">
+            <article class="fx-mini-list__item">
+              <div>
+                <strong>${escapeHtml(c.description)}</strong>
+                <p>${escapeHtml(c.postedDate ?? "")}${c.merchant ? ` · ${escapeHtml(c.merchant)}` : ""}</p>
+              </div>
+              <span>${amountLabel}</span>
+            </article>
+          </div>
+          <div class="field">
+            <span style="font-weight:600">Link to</span>
+            <select name="target">
+              <option value="UNCATEGORIZED:">(Uncategorized · leave out of planner actuals)</option>
+              ${cashOpts}
+              ${billOpts}
+              ${debtOpts}
+              ${expenseOpts}
+              ${housingOpts}
+              ${goalOpts}
+            </select>
+            <span class="muted">Picking a bill, debt, expense, or housing bucket posts this transaction as a planner actual so the plan recomputes against it.</span>
+          </div>
+          <label class="field">Note<input name="note" placeholder="Optional note" /></label>
+          <div class="row" style="justify-content:flex-end;margin-top:12px">
+            <button type="button" class="secondary" data-categorize-cancel>Cancel</button>
+            <button type="submit" ${busy ? "disabled" : ""}>${busy ? "Saving…" : "Save adjustment"}</button>
+          </div>
+          ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
+        </form>
       </div>
     </div>
   `;
@@ -2650,6 +3334,7 @@ function wireApp() {
     state.plannerSyncBusy = false;
     state.accounts = [];
     state.transactions = [];
+    state.categorizeEditor = null;
     state.busy = false;
     state.authModalOpen = false;
     applyFullTheme(null);
@@ -2755,6 +3440,267 @@ function wireApp() {
       void loadTransactions();
     });
   });
+
+  document.querySelector<HTMLButtonElement>("#btn-recompute-plan")?.addEventListener("click", () => {
+    void loadNormalizedAndRecompute({ persist: true });
+  });
+
+  wireSettingsEditorButtons();
+  wireCategorizeButtons();
+}
+
+function wireCategorizeButtons() {
+  document.querySelectorAll<HTMLButtonElement>("[data-categorize-tx]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const txId = btn.getAttribute("data-categorize-tx") ?? "";
+      if (!txId) return;
+      const description = btn.getAttribute("data-categorize-desc") ?? "";
+      const merchant = btn.getAttribute("data-categorize-merchant") ?? "";
+      const amount = Number(btn.getAttribute("data-categorize-amount") ?? 0);
+      const postedDate = btn.getAttribute("data-categorize-date") ?? "";
+      state.categorizeEditor = {
+        txId,
+        description,
+        merchant: merchant || null,
+        amount: Number.isFinite(amount) ? amount : 0,
+        postedDate: postedDate || null,
+      };
+      state.error = null;
+      render();
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-categorize-cancel]").forEach((el) => {
+    el.addEventListener("click", () => {
+      state.categorizeEditor = null;
+      state.error = null;
+      render();
+    });
+  });
+  document.querySelector<HTMLFormElement>("#form-categorize")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const form = e.target as HTMLFormElement;
+    const userId = state.session?.user?.id;
+    if (!userId) return;
+    const fd = new FormData(form);
+    const targetRaw = String(fd.get("target") ?? "UNCATEGORIZED:");
+    const [kindRaw, idRaw] = targetRaw.split(":");
+    const kind = (kindRaw || "UNCATEGORIZED").toUpperCase() as PlannerActualTarget["kind"];
+    const id = (idRaw ?? "").trim();
+    const note = String(fd.get("note") ?? "").trim();
+    const txId = form.getAttribute("data-tx-id") ?? "";
+    const description = form.getAttribute("data-tx-desc") ?? "";
+    const merchant = form.getAttribute("data-tx-merchant") ?? "";
+    const amount = Number(form.getAttribute("data-tx-amount") ?? 0);
+    const postedDate = form.getAttribute("data-tx-date") ?? "";
+    if (!txId) return;
+    await withRecompute(async () => {
+      await saveTransactionCategorization(userId, {
+        transactionId: txId,
+        categoryKind: kind,
+        billId: kind === "BILL" ? id : null,
+        debtId: kind === "DEBT" ? id : null,
+        expenseId: kind === "EXPENSE" ? id : null,
+        goalId: kind === "GOAL" ? id : null,
+        housingBucketId: kind === "HOUSING" ? id : null,
+        note,
+        isUserOverride: true,
+      });
+      const txRef = {
+        id: txId,
+        description,
+        merchant,
+        amount,
+        postedDate: postedDate || null,
+      };
+      if (kind === "BILL" || kind === "DEBT" || kind === "EXPENSE" || kind === "HOUSING") {
+        if (id) {
+          await linkTransactionToPlannerActual(userId, txId, { kind, id }, txRef, "Manual");
+        }
+      } else {
+        // UNCATEGORIZED, CASH_IN, CASH_OUT, GOAL, INCOME: remove any planner actual tied to this tx
+        await deleteTransactionLinkedActuals(userId, txId);
+      }
+    }, "Transaction adjusted and plan recomputed.");
+    state.categorizeEditor = null;
+    render();
+  });
+}
+
+function wireSettingsEditorButtons() {
+  document.querySelectorAll<HTMLButtonElement>("[data-settings-add]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const kind = btn.getAttribute("data-settings-add") as SettingsEditorState["kind"] | null;
+      if (!kind) return;
+      state.settingsEditor = kind === "housing"
+        ? { kind }
+        : kind === "planner-settings"
+          ? { kind }
+          : { kind } as SettingsEditorState;
+      state.error = null;
+      render();
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-settings-edit]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const kind = btn.getAttribute("data-settings-edit") as SettingsEditorState["kind"] | null;
+      const id = btn.getAttribute("data-settings-id") ?? undefined;
+      if (!kind) return;
+      state.settingsEditor = { kind, id } as SettingsEditorState;
+      state.error = null;
+      render();
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-settings-delete]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const kind = btn.getAttribute("data-settings-delete") as SettingsEditorState["kind"] | null;
+      const id = btn.getAttribute("data-settings-id");
+      if (!kind || !id) return;
+      if (!confirm("Remove this item and recompute?")) return;
+      const userId = state.session?.user?.id;
+      if (!userId) return;
+      await withRecompute(async () => {
+        switch (kind) {
+          case "bill": await deleteBill(userId, id); break;
+          case "income": await deleteIncomeSource(userId, id); break;
+          case "debt": await deleteDebt(userId, id); break;
+          case "expense": await deleteRecurringExpense(userId, id); break;
+          case "goal": await deleteGoal(userId, id); break;
+        }
+      }, "Removed and recomputed.");
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-settings-editor-cancel]").forEach((el) => {
+    el.addEventListener("click", () => {
+      state.settingsEditor = null;
+      state.error = null;
+      render();
+    });
+  });
+
+  const editorForm = document.querySelector<HTMLFormElement>("#form-settings-editor");
+  if (editorForm) {
+    editorForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      void submitSettingsEditor(editorForm);
+    });
+    editorForm.querySelector<HTMLButtonElement>("[data-settings-editor-delete]")?.addEventListener("click", async () => {
+      const kind = editorForm.getAttribute("data-editor-kind") as SettingsEditorState["kind"] | null;
+      const id = editorForm.getAttribute("data-editor-id") ?? "";
+      const userId = state.session?.user?.id;
+      if (!kind || !id || !userId) return;
+      if (!confirm("Remove this item and recompute?")) return;
+      await withRecompute(async () => {
+        switch (kind) {
+          case "bill": await deleteBill(userId, id); break;
+          case "income": await deleteIncomeSource(userId, id); break;
+          case "debt": await deleteDebt(userId, id); break;
+          case "expense": await deleteRecurringExpense(userId, id); break;
+          case "goal": await deleteGoal(userId, id); break;
+        }
+      }, "Removed and recomputed.");
+      state.settingsEditor = null;
+      render();
+    });
+  }
+}
+
+async function submitSettingsEditor(form: HTMLFormElement) {
+  const kind = form.getAttribute("data-editor-kind") as SettingsEditorState["kind"] | null;
+  const id = form.getAttribute("data-editor-id") || undefined;
+  const userId = state.session?.user?.id;
+  if (!kind || !userId) return;
+  const fd = new FormData(form);
+  const getStr = (k: string) => String(fd.get(k) ?? "").trim();
+  const getNum = (k: string) => {
+    const v = fd.get(k);
+    if (v === null || v === undefined || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const readRule = (prefix: string) => ({
+    type: getStr(`${prefix}_type`) as "ONE_TIME" | "DAILY" | "WEEKLY" | "BIWEEKLY" | "SEMI_MONTHLY" | "MONTHLY" | "QUARTERLY" | "YEARLY" | "EVERY_X_DAYS" | "CUSTOM_INTERVAL",
+    anchorDate: getStr(`${prefix}_anchor`) || undefined,
+    dayOfMonth: getNum(`${prefix}_dayOfMonth`) ?? undefined,
+    intervalDays: getNum(`${prefix}_intervalDays`) ?? undefined,
+  });
+
+  const result = await withRecompute(async () => {
+    switch (kind) {
+      case "bill":
+        await saveBill(userId, {
+          id, name: getStr("name"),
+          amountDue: getNum("amountDue") ?? 0,
+          minimumDue: getNum("minimumDue") ?? 0,
+          currentAmountDue: getNum("currentAmountDue") ?? 0,
+          category: getStr("category"),
+          isEssential: fd.get("isEssential") === "on",
+          paymentPolicy: (getStr("paymentPolicy") as "HARD_DUE" | "FLEXIBLE_DUE") || "HARD_DUE",
+          recurringRule: readRule("rule"),
+        });
+        break;
+      case "income":
+        await saveIncomeSource(userId, {
+          id, name: getStr("name"), payerLabel: getStr("payerLabel"),
+          amountRange: { minimum: getNum("minimum") ?? undefined, target: getNum("target") ?? undefined, maximum: getNum("maximum") ?? undefined },
+          nextExpectedPayDate: getStr("nextExpectedPayDate") || null,
+          isActive: fd.get("isActive") === "on",
+          recurringRule: readRule("rule"),
+        });
+        break;
+      case "debt": {
+        const bankAccountId = getStr("bankAccountId") || null;
+        const manualBalance = getNum("currentBalance") ?? getNum("currentBalanceFallback") ?? 0;
+        const linkedAccount = bankAccountId
+          ? state.normalizedSnapshot?.accounts.find((a) => a.id === bankAccountId) ?? null
+          : null;
+        const liveBalance = linkedAccount ? Math.abs(linkedAccount.currentBalance) : null;
+        await saveDebt(userId, {
+          id, name: getStr("name"), lender: getStr("lender"), type: getStr("type"),
+          currentBalance: liveBalance ?? manualBalance,
+          minimumDue: getNum("minimumDue") ?? 0,
+          requiredDueDate: getStr("requiredDueDate") || null,
+          bankAccountId,
+        });
+        break;
+      }
+      case "expense":
+        await saveRecurringExpense(userId, {
+          id, name: getStr("name"), amount: getNum("amount") ?? 0,
+          isEssential: fd.get("isEssential") === "on",
+          categoryLabel: getStr("categoryLabel"),
+          recurringRule: readRule("rule"),
+        });
+        break;
+      case "goal":
+        await saveGoal(userId, {
+          id, name: getStr("name"),
+          targetAmount: getNum("targetAmount") ?? 0,
+          currentAmount: getNum("currentAmount") ?? 0,
+          isActive: fd.get("isActive") === "on",
+        });
+        break;
+      case "housing":
+        await saveHousingConfig(userId, {
+          currentMonthlyRent: getNum("currentMonthlyRent") ?? 0,
+          minimumAcceptablePayment: getNum("minimumAcceptablePayment") ?? 0,
+          rentDueDay: getNum("rentDueDay") ?? 1,
+          arrangement: getStr("arrangement"),
+        });
+        break;
+      case "planner-settings":
+        await savePlannerSettings(userId, {
+          targetBuffer: getNum("targetBuffer") ?? 0,
+          horizonDays: getNum("horizonDays") ?? 120,
+          selectedScenarioMode: (getStr("selectedScenarioMode") as "FIXED" | "LOWEST_INCOME" | "MOST_EFFICIENT" | "HIGHEST_INCOME") || "FIXED",
+        });
+        break;
+    }
+  }, "Saved and recomputed.");
+
+  if (result !== null) {
+    state.settingsEditor = null;
+    render();
+  }
 }
 
 async function init() {
@@ -2811,6 +3757,7 @@ async function init() {
         state.normalizedSnapshotBusy = false;
         state.normalizedSnapshotError = null;
         state.settingsEditor = null;
+        state.categorizeEditor = null;
         state.accounts = [];
         state.transactions = [];
       }

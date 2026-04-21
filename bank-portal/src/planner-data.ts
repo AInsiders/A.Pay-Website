@@ -169,6 +169,7 @@ export async function loadPlannerSnapshot(userId: string): Promise<PlannerSnapsh
         minimumDue: numOr(r.minimum_due, 0),
         requiredDueDate: dateOr(r.required_due_date),
         arrearsAmount: numOr(r.arrears_amount, 0),
+        bankAccountId: r.bank_account_id ? String(r.bank_account_id) : null,
       } satisfies SnapshotDebt;
     }),
     debtTransactions: (debtTransactions.data ?? []).map((raw) => {
@@ -377,6 +378,8 @@ export interface DebtFormInput {
   currentBalance: number;
   minimumDue: number;
   requiredDueDate?: string | null;
+  /** When set, the debt's current balance is driven by the live `bank_accounts` balance for this id. */
+  bankAccountId?: string | null;
 }
 
 export async function saveDebt(userId: string, input: DebtFormInput) {
@@ -389,6 +392,7 @@ export async function saveDebt(userId: string, input: DebtFormInput) {
     current_balance: input.currentBalance,
     minimum_due: input.minimumDue,
     required_due_date: input.requiredDueDate ?? null,
+    bank_account_id: input.bankAccountId ?? null,
   }));
   if (error) throw new Error(error.message);
   return id;
@@ -536,6 +540,403 @@ export async function saveTransactionCategorization(userId: string, input: {
     is_user_override: input.isUserOverride ?? true,
   }, { onConflict: "user_id,transaction_id" });
   if (error) throw new Error(error.message);
+}
+
+/**
+ * One-time migration: if the signed-in account has data in `planner_snapshots.snapshot`
+ * (typically pushed from the Android app) but the normalized tables are empty, copy the
+ * snapshot contents into the normalized tables so both platforms share the same rows.
+ *
+ * Idempotent — skips entities that already have any rows for this user.
+ */
+export async function importLegacySnapshotIntoNormalized(userId: string, snapshot: Record<string, unknown>): Promise<{ importedEntities: string[]; skippedEntities: string[] }> {
+  const imported: string[] = [];
+  const skipped: string[] = [];
+
+  const rawBills = Array.isArray(snapshot.bills) ? snapshot.bills : [];
+  const rawIncome = Array.isArray(snapshot.incomeSources) ? snapshot.incomeSources : [];
+  const rawDebts = Array.isArray(snapshot.debts) ? snapshot.debts : [];
+  const rawExpenses = Array.isArray(snapshot.expenses) ? snapshot.expenses : [];
+  const rawGoals = Array.isArray(snapshot.goals) ? snapshot.goals : [];
+  const rawAccounts = Array.isArray(snapshot.accounts) ? snapshot.accounts : [];
+  const rawPaychecks = Array.isArray(snapshot.paychecks) ? snapshot.paychecks : [];
+  const rawBillPayments = Array.isArray(snapshot.billPayments) ? snapshot.billPayments : [];
+  const rawDebtTx = Array.isArray(snapshot.debtTransactions) ? snapshot.debtTransactions : [];
+  const rawExpenseSpends = Array.isArray(snapshot.expenseSpends) ? snapshot.expenseSpends : [];
+  const rawHousingBuckets = Array.isArray(snapshot.housingBuckets) ? snapshot.housingBuckets : [];
+  const rawHousingPayments = Array.isArray(snapshot.housingPayments) ? snapshot.housingPayments : [];
+  const rawCashAdj = Array.isArray(snapshot.cashAdjustments) ? snapshot.cashAdjustments : [];
+  const rawHousingConfig = snapshot.housingConfig as Record<string, unknown> | null | undefined;
+  const rawSettings = snapshot.settings as Record<string, unknown> | null | undefined;
+
+  const rowsEmpty = async (table: string): Promise<boolean> => {
+    const { data, error } = await supabase.from(table).select("id", { count: "exact", head: true }).eq("user_id", userId);
+    if (error) return false;
+    return !data || data.length === 0;
+  };
+
+  const upsertIfEmpty = async (table: string, rows: Array<Record<string, unknown>>, label: string) => {
+    if (rows.length === 0) return;
+    const empty = await rowsEmpty(table);
+    if (!empty) { skipped.push(label); return; }
+    const { error } = await supabase.from(table).upsert(rows.map((r) => ({ ...r, user_id: userId })));
+    if (error) { skipped.push(`${label} (error: ${error.message})`); return; }
+    imported.push(`${label} (${rows.length})`);
+  };
+
+  await upsertIfEmpty(
+    "bank_accounts",
+    rawAccounts.map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? newId()),
+        name: String(r.name ?? "Account"),
+        type: String(r.type ?? "Checking"),
+        current_balance: Number(r.currentBalance ?? 0),
+        available_balance: Number(r.availableBalance ?? 0),
+        include_in_planning: r.includeInPlanning !== false,
+        protected_from_payoff: r.protectedFromPayoff === true,
+        teller_enrollment_id: r.tellerEnrollmentId ?? null,
+        teller_linked_account_id: r.tellerLinkedAccountId ?? null,
+      };
+    }),
+    "accounts",
+  );
+
+  await upsertIfEmpty(
+    "income_sources",
+    rawIncome.map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? newId()),
+        name: String(r.name ?? ""),
+        payer_label: String(r.payerLabel ?? ""),
+        recurring_rule: r.recurringRule ?? {},
+        amount_range: r.amountRange ?? {},
+        forecast_amount_mode: String(r.forecastAmountMode ?? "FIXED"),
+        input_mode: String(r.inputMode ?? "USABLE"),
+        next_expected_pay_date: r.nextExpectedPayDate ?? null,
+        is_active: r.isActive !== false,
+      };
+    }),
+    "income_sources",
+  );
+
+  await upsertIfEmpty(
+    "bills",
+    rawBills.map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? newId()),
+        name: String(r.name ?? ""),
+        amount_due: Number(r.amountDue ?? 0),
+        minimum_due: Number(r.minimumDue ?? 0),
+        current_amount_due: Number(r.currentAmountDue ?? 0),
+        recurring_rule: r.recurringRule ?? {},
+        category: String(r.category ?? ""),
+        is_essential: r.isEssential === true,
+        status: String(r.status ?? "UPCOMING"),
+        payment_policy: String(r.paymentPolicy ?? "HARD_DUE"),
+      };
+    }),
+    "bills",
+  );
+
+  await upsertIfEmpty(
+    "bill_payments",
+    rawBillPayments.map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? newId()),
+        bill_id: String(r.billId ?? ""),
+        amount: Number(r.amount ?? 0),
+        payment_date: r.paymentDate ?? null,
+      };
+    }),
+    "bill_payments",
+  );
+
+  await upsertIfEmpty(
+    "debts",
+    rawDebts.map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? newId()),
+        name: String(r.name ?? ""),
+        lender: String(r.lender ?? ""),
+        type: String(r.type ?? "INSTALLMENT"),
+        current_balance: Number(r.currentBalance ?? 0),
+        minimum_due: Number(r.minimumDue ?? 0),
+        required_due_date: r.requiredDueDate ?? null,
+        arrears_amount: Number(r.arrearsAmount ?? 0),
+      };
+    }),
+    "debts",
+  );
+
+  await upsertIfEmpty(
+    "debt_transactions",
+    rawDebtTx.map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? newId()),
+        debt_id: String(r.debtId ?? ""),
+        type: String(r.type ?? "PAYMENT"),
+        amount: Number(r.amount ?? 0),
+        event_date: r.eventDate ?? null,
+      };
+    }),
+    "debt_transactions",
+  );
+
+  await upsertIfEmpty(
+    "recurring_expenses",
+    rawExpenses.map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? newId()),
+        name: String(r.name ?? ""),
+        amount: Number(r.amount ?? 0),
+        recurring_rule: r.recurringRule ?? {},
+        is_essential: r.isEssential !== false,
+        is_variable: r.isVariable === true,
+        allocation_mode: String(r.allocationMode ?? "EVENLY"),
+        one_time_date: r.oneTimeDate ?? null,
+        category_label: String(r.categoryLabel ?? ""),
+      };
+    }),
+    "recurring_expenses",
+  );
+
+  await upsertIfEmpty(
+    "expense_spends",
+    rawExpenseSpends.map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? newId()),
+        expense_id: String(r.expenseId ?? ""),
+        amount: Number(r.amount ?? 0),
+        spend_date: r.spendDate ?? null,
+      };
+    }),
+    "expense_spends",
+  );
+
+  if (rawHousingConfig) {
+    const empty = await rowsEmpty("housing_config");
+    if (empty) {
+      const { error } = await supabase.from("housing_config").upsert({
+        user_id: userId,
+        id: "housing",
+        current_monthly_rent: Number(rawHousingConfig.currentMonthlyRent ?? 0),
+        minimum_acceptable_payment: Number(rawHousingConfig.minimumAcceptablePayment ?? 0),
+        rent_due_day: Number(rawHousingConfig.rentDueDay ?? 1),
+        arrangement: String(rawHousingConfig.arrangement ?? "RENT_MONTH_TO_MONTH"),
+      });
+      if (!error) imported.push("housing_config");
+      else skipped.push(`housing_config (error: ${error.message})`);
+    } else skipped.push("housing_config");
+  }
+
+  await upsertIfEmpty(
+    "housing_buckets",
+    rawHousingBuckets.map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? newId()),
+        label: String(r.label ?? ""),
+        month_key: String(r.monthKey ?? ""),
+        amount_due: Number(r.amountDue ?? 0),
+        amount_paid: Number(r.amountPaid ?? 0),
+        due_date: r.dueDate ?? null,
+        is_current_bucket: r.isCurrentBucket === true,
+      };
+    }),
+    "housing_buckets",
+  );
+
+  await upsertIfEmpty(
+    "housing_payments",
+    rawHousingPayments.map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? newId()),
+        bucket_id: String(r.bucketId ?? ""),
+        amount: Number(r.amount ?? 0),
+        payment_date: r.paymentDate ?? null,
+      };
+    }),
+    "housing_payments",
+  );
+
+  await upsertIfEmpty(
+    "goals",
+    rawGoals.map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? newId()),
+        name: String(r.name ?? ""),
+        target_amount: Number(r.targetAmount ?? 0),
+        current_amount: Number(r.currentAmount ?? 0),
+        is_active: r.isActive !== false,
+      };
+    }),
+    "goals",
+  );
+
+  await upsertIfEmpty(
+    "paychecks",
+    rawPaychecks.map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? newId()),
+        income_source_id: r.incomeSourceId ?? null,
+        payer_label: String(r.payerLabel ?? ""),
+        date: r.date ?? null,
+        amount: Number(r.amount ?? 0),
+        deposited: r.deposited === true,
+        account_id: r.accountId ?? null,
+      };
+    }),
+    "paychecks",
+  );
+
+  await upsertIfEmpty(
+    "cash_adjustments",
+    rawCashAdj.map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? newId()),
+        account_id: r.accountId ?? null,
+        type: String(r.type ?? "CASH_IN"),
+        amount: Number(r.amount ?? 0),
+        adjustment_date: r.adjustmentDate ?? null,
+      };
+    }),
+    "cash_adjustments",
+  );
+
+  if (rawSettings && Object.keys(rawSettings).length > 0) {
+    const empty = await rowsEmpty("planner_settings");
+    if (empty) {
+      const { error } = await supabase.from("planner_settings").upsert({
+        user_id: userId,
+        settings: rawSettings,
+      });
+      if (!error) imported.push("planner_settings");
+      else skipped.push(`planner_settings (error: ${error.message})`);
+    } else skipped.push("planner_settings");
+  }
+
+  return { importedEntities: imported, skippedEntities: skipped };
+}
+
+export type PlannerActualTarget =
+  | { kind: "BILL"; id: string }
+  | { kind: "DEBT"; id: string }
+  | { kind: "EXPENSE"; id: string }
+  | { kind: "HOUSING"; id: string }
+  | { kind: "GOAL"; id: string }
+  | { kind: "INCOME"; id: string }
+  | { kind: "CASH_IN" }
+  | { kind: "CASH_OUT" }
+  | { kind: "UNCATEGORIZED" };
+
+export interface TransactionRef {
+  id: string;
+  description: string;
+  merchant?: string | null;
+  amount: number;
+  postedDate?: string | null;
+}
+
+function plannerActualId(txId: string, kind: string): string {
+  return `tx_${txId}_${kind.toLowerCase()}`;
+}
+
+/**
+ * Remove any planner actual rows (`bill_payments`, `debt_transactions`,
+ * `expense_spends`, `housing_payments`) that were previously created from this
+ * bank transaction. Safe to call before re-linking so category switches never
+ * leave stale postings behind. Errors are ignored so one dead row does not
+ * block the entire re-categorization.
+ */
+export async function deleteTransactionLinkedActuals(userId: string, txId: string): Promise<void> {
+  const billId = plannerActualId(txId, "BILL");
+  const debtId = plannerActualId(txId, "DEBT");
+  const expenseId = plannerActualId(txId, "EXPENSE");
+  const housingId = plannerActualId(txId, "HOUSING");
+  await supabase.from("bill_payments").delete().eq("user_id", userId).eq("id", billId);
+  await supabase.from("debt_transactions").delete().eq("user_id", userId).eq("id", debtId);
+  await supabase.from("expense_spends").delete().eq("user_id", userId).eq("id", expenseId);
+  await supabase.from("housing_payments").delete().eq("user_id", userId).eq("id", housingId);
+}
+
+/**
+ * Post (or re-post) a planner actual derived from a bank transaction, using a
+ * deterministic id so the row is idempotent across re-syncs and user
+ * re-categorizations. Any prior actuals linked to this transaction are
+ * removed before the new row is inserted.
+ */
+export async function linkTransactionToPlannerActual(
+  userId: string,
+  txId: string,
+  target: PlannerActualTarget,
+  tx: TransactionRef,
+  sourceLabel = "Bank",
+): Promise<boolean> {
+  await deleteTransactionLinkedActuals(userId, txId);
+  const amount = Math.abs(tx.amount);
+  const date = tx.postedDate ?? new Date().toISOString().slice(0, 10);
+  const label = `${sourceLabel} · ${tx.merchant ?? tx.description}`.slice(0, 120);
+  try {
+    if (target.kind === "BILL") {
+      const { error } = await supabase.from("bill_payments").upsert(withUser(userId, {
+        id: plannerActualId(txId, "BILL"),
+        bill_id: target.id,
+        amount,
+        payment_date: date,
+        source_label: label,
+        note: `Linked bank transaction ${tx.id}`,
+      }));
+      return !error;
+    }
+    if (target.kind === "DEBT") {
+      const { error } = await supabase.from("debt_transactions").upsert(withUser(userId, {
+        id: plannerActualId(txId, "DEBT"),
+        debt_id: target.id,
+        type: "PAYMENT",
+        amount,
+        event_date: date,
+        source_label: label,
+        note: `Linked bank transaction ${tx.id}`,
+      }));
+      return !error;
+    }
+    if (target.kind === "EXPENSE") {
+      const { error } = await supabase.from("expense_spends").upsert(withUser(userId, {
+        id: plannerActualId(txId, "EXPENSE"),
+        expense_id: target.id,
+        amount,
+        spend_date: date,
+        note: `Linked bank transaction ${tx.id}`,
+      }));
+      return !error;
+    }
+    if (target.kind === "HOUSING") {
+      const { error } = await supabase.from("housing_payments").upsert(withUser(userId, {
+        id: plannerActualId(txId, "HOUSING"),
+        bucket_id: target.id,
+        amount,
+        payment_date: date,
+        note: `Linked bank transaction ${tx.id}`,
+      }));
+      return !error;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 export async function saveTransactionSplits(userId: string, transactionId: string, splits: Array<{

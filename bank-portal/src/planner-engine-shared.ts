@@ -115,6 +115,8 @@ export interface SnapshotDebt {
   minimumDue: number;
   requiredDueDate?: string | null;
   arrearsAmount?: number;
+  /** When set, the planner uses the live `bank_accounts` balance for this id as the debt balance. */
+  bankAccountId?: string | null;
 }
 
 export interface SnapshotDebtTransaction {
@@ -567,6 +569,24 @@ function forecastDebtObligations(snapshot: PlannerSnapshot, today: Date, horizon
   return out;
 }
 
+/**
+ * Return the live bank balance that represents the debt's outstanding balance,
+ * or `null` if the debt is not linked. Credit-card accounts report the owed
+ * amount as a positive `currentBalance`; depository accounts don't make sense
+ * as a debt source, so we only honor the link when the account's balance is
+ * non-zero so an unsynced account doesn't silently zero out a debt.
+ */
+function liveBalanceForDebt(
+  debt: SnapshotDebt,
+  accountsById: Map<string, SnapshotAccount>,
+): number | null {
+  const linkedId = debt.bankAccountId?.trim();
+  if (!linkedId) return null;
+  const account = accountsById.get(linkedId);
+  if (!account) return null;
+  return Math.abs(account.currentBalance);
+}
+
 function forecastHousingObligations(snapshot: PlannerSnapshot, today: Date): ForecastObligation[] {
   const out: ForecastObligation[] = [];
   for (const bucket of snapshot.housingBuckets) {
@@ -785,11 +805,14 @@ export function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
   const timeline = buildTimeline(snapshot, paychecks, obligations);
   const reservesHeld = timeline.flatMap((row) => row.reserveNowList ?? []).slice(0, 10);
 
+  const accountsById = new Map(snapshot.accounts.map((a) => [a.id, a]));
   const debtItems: PlannerDebtSummaryItem[] = [];
   let debtTotal = 0;
   for (const d of snapshot.debts) {
     const paid = paidSumByDebt(snapshot, d.id);
-    const bal = Math.max(0, money(d.currentBalance - paid));
+    const liveBalance = liveBalanceForDebt(d, accountsById);
+    const sourceBalance = liveBalance ?? d.currentBalance;
+    const bal = Math.max(0, money(sourceBalance - paid));
     debtTotal += bal;
     debtItems.push({ label: d.name, balanceLeft: bal });
   }

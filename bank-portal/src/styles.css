@@ -7,7 +7,7 @@
   --border-glow: color-mix(in srgb, var(--accent) 35%, transparent);
   --text: #eef2f8;
   --muted: #8b95a8;
-  --accent: #5ee7ff;
+  --accent: #12C8FF;
   --accent-dim: color-mix(in srgb, var(--accent) 28%, transparent);
   --accent-glow: color-mix(in srgb, var(--accent) 55%, transparent);
   --danger: #ff7b9c;
@@ -257,7 +257,7 @@ body {
 
 /* Landing-only: electric blue · gold · “all cash” mood (signed-in app keeps global theme) */
 .fx-root.fx-root--landing {
-  --accent: #5ee7ff;
+  --accent: #12C8FF;
   --accent-dim: color-mix(in srgb, var(--accent) 24%, transparent);
   --accent-glow: color-mix(in srgb, var(--accent) 55%, #fef08a);
   --landing-gold: #fcd34d;
