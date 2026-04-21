@@ -1,5 +1,5 @@
 import { verify } from "npm:@noble/ed25519@1.7.3";
-import { corsHeaders, jsonResponse, preflightResponse } from "../_shared/cors.ts";
+import { corsHeadersForRequest, jsonResponse, preflightResponse } from "../_shared/cors.ts";
 import { supabaseServiceClient, supabaseUserClient } from "../_shared/supabase.ts";
 
 const FN = "teller-enrollment-complete";
@@ -14,12 +14,13 @@ function jsonError(
   message: string,
   code: string,
   logDetail?: Record<string, unknown>,
+  req?: Request,
 ) {
   logEvent("response", { status, code, message, ...logDetail });
   return new Response(JSON.stringify({ error: message, code }), {
     status,
     headers: {
-      ...corsHeaders,
+      ...corsHeadersForRequest(req),
       "Content-Type": "application/json",
       "X-Teller-Error-Code": code,
     },
@@ -76,10 +77,10 @@ async function sha256Bytes(dotted: string): Promise<Uint8Array> {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return preflightResponse();
+    return preflightResponse(req);
   }
   if (req.method !== "POST") {
-    return jsonResponse({ error: "Method not allowed" }, 405);
+    return jsonResponse({ error: "Method not allowed" }, 405, req);
   }
 
   try {
@@ -93,6 +94,7 @@ Deno.serve(async (req) => {
       "Unexpected error — check Edge Function logs for details",
       "unhandled",
       { originalMessage: msg },
+      req,
     );
   }
 });
@@ -101,7 +103,7 @@ async function handlePost(req: Request): Promise<Response> {
   const userClient = supabaseUserClient(req);
   const { data: userData, error: userErr } = await userClient.auth.getUser();
   if (userErr || !userData.user) {
-    return jsonResponse({ error: "Unauthorized" }, 401);
+    return jsonResponse({ error: "Unauthorized" }, 401, req);
   }
 
   const publicKeys = parsePublicKeys();
@@ -110,6 +112,8 @@ async function handlePost(req: Request): Promise<Response> {
       503,
       "TELLER_TOKEN_SIGNING_PUBLIC_KEY not configured",
       "missing_signing_key",
+      undefined,
+      req,
     );
   }
 
@@ -117,7 +121,7 @@ async function handlePost(req: Request): Promise<Response> {
   try {
     body = await req.json();
   } catch {
-    return jsonResponse({ error: "Invalid JSON" }, 400);
+    return jsonResponse({ error: "Invalid JSON" }, 400, req);
   }
 
   const nonce = body.nonce?.trim();
@@ -131,11 +135,11 @@ async function handlePost(req: Request): Promise<Response> {
   if (!nonce || !accessToken || !userId || !enrollmentId) {
     return jsonResponse({
       error: "Missing nonce, accessToken, userId, or enrollmentId",
-    }, 400);
+    }, 400, req);
   }
 
   if (!Array.isArray(signatures) || signatures.length === 0) {
-    return jsonResponse({ error: "No signatures to verify" }, 400);
+    return jsonResponse({ error: "No signatures to verify" }, 400, req);
   }
 
   const admin = supabaseServiceClient();
@@ -153,14 +157,14 @@ async function handlePost(req: Request): Promise<Response> {
         details: nonceErr.details,
         hint: nonceErr.hint,
       },
-    });
+    }, req);
   }
   if (!nonceRow) {
-    return jsonResponse({ error: "Invalid, expired, or already used nonce" }, 400);
+    return jsonResponse({ error: "Invalid, expired, or already used nonce" }, 400, req);
   }
   if (new Date(nonceRow.expires_at).getTime() < Date.now()) {
     await admin.from("teller_nonces").delete().eq("nonce", nonce);
-    return jsonResponse({ error: "Nonce expired" }, 400);
+    return jsonResponse({ error: "Nonce expired" }, 400, req);
   }
 
   const dotted = `${nonce}.${accessToken}.${userId}.${enrollmentId}.${environment}`;
@@ -194,7 +198,7 @@ async function handlePost(req: Request): Promise<Response> {
       keyCount: publicKeys.length,
       sigCount: signatures.length,
     });
-    return jsonError(401, "Signature verification failed", "signature_verify_failed");
+    return jsonError(401, "Signature verification failed", "signature_verify_failed", undefined, req);
   }
 
   await admin.from("teller_nonces").delete().eq("nonce", nonce);
@@ -219,9 +223,9 @@ async function handlePost(req: Request): Promise<Response> {
         details: upsertErr.details,
         hint: upsertErr.hint,
       },
-    });
+    }, req);
   }
 
   logEvent("enrollment_saved", { userIdSuffix: userData.user.id.slice(-8) });
-  return jsonResponse({ ok: true });
+  return jsonResponse({ ok: true }, 200, req);
 }

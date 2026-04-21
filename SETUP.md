@@ -82,6 +82,9 @@ In Supabase → **Edge Functions** → **Secrets**, set at least:
 | `TELLER_TOKEN_SIGNING_PUBLIC_KEY` or `TELLER_TOKEN_SIGNING_PUBLIC_KEYS` | Teller Dashboard — verify Connect payloads |
 | `TELLER_CERT_PEM` / `TELLER_KEY_PEM` | Often required for **development/production** Teller API (not always for sandbox) |
 | `TELLER_WEBHOOK_SIGNING_SECRET` or `TELLER_WEBHOOK_SIGNING_SECRETS` | Teller webhooks only |
+| `ALLOW_APP_ORIGINS` (optional) | Comma-separated full origins for CORS when the app is **not** on `*.github.io` or localhost (e.g. `https://pay.example.com,https://www.example.com`). |
+
+Edge Functions echo `Access-Control-Allow-Origin` for `https://*.github.io` and `http://localhost:*` / `127.0.0.1` so the browser can read responses after Connect.
 
 Also add GitHub **Actions secrets** for the **static build** (same names as local):
 
@@ -152,6 +155,25 @@ Use **Supabase Dashboard → Edge Functions → [function] → Logs** (or **Log 
 | **`nonce_lookup_failed`** / missing nonce | Clock skew, expired nonce, or `teller-nonce` / Connect flow did not align with the signed-in user. |
 
 If logs show **no invocation** for `teller-enrollment-complete` while the browser reports CORS, the request was likely **stopped at the gateway** (JWT verify)—redeploy with `--no-verify-jwt` as above.
+
+### Diagnose “failed Edge” (wrong project, gateway vs function, CORS)
+
+1. **Confirm the URL** — In DevTools → Network, failing requests must go to the **same** host as `VITE_SUPABASE_URL` in your **built** site (GitHub Actions / `.env` at build time). A typo or old ref explains “works locally, fails on Pages”.
+
+2. **Confirm functions exist** — Dashboard → **Edge Functions** → you should see `teller-nonce`, `teller-enrollment-complete`, `teller-data`, `teller-webhook`. If any are missing, deploy from this repo (`scripts/deploy-teller-edge-functions.*` or the four CLI commands).
+
+3. **Gateway vs your code** — Open **Edge Functions → Logs** (or Log Explorer) filtered to the slug.  
+   - **No log line** for a failed browser request → the gateway likely returned **401/404** before Deno ran (classic: **Verify JWT on** with **ES256** session → redeploy with `--no-verify-jwt`).  
+   - **Log lines with** `signature_verify_failed`, `nonce_lookup_failed`, `enrollment_upsert_failed` → your handler ran; read `error` / `code` in the JSON response (the app banner also unpacks these).
+
+4. **CORS preflight without the browser** — From a shell (optional `Origin` as second arg on bash):
+
+   - **Windows:** set `VITE_SUPABASE_URL` then `.\scripts\smoke-teller-edge-cors.ps1`  
+   - **Unix:** `export VITE_SUPABASE_URL=...` then `./scripts/smoke-teller-edge-cors.sh`
+
+   If the response **omits** `Access-Control-Allow-Origin`, treat it as gateway/slug/deploy, not as “fix CORS in Deno only.”
+
+5. **Database** — If enrollment never appears, confirm migrations ran (`teller_nonces`, `teller_enrollments` exist). MCP/SQL against a **different** project will not reflect production.
 
 ---
 

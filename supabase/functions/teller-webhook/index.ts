@@ -30,10 +30,10 @@ function timingSafeEqualBytes(a: Uint8Array, b: Uint8Array): boolean {
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return preflightResponse();
+    return preflightResponse(req);
   }
   if (req.method !== "POST") {
-    return jsonResponse({ error: "Method not allowed" }, 405);
+    return jsonResponse({ error: "Method not allowed" }, 405, req);
   }
 
   const rawSecrets = Deno.env.get("TELLER_WEBHOOK_SIGNING_SECRETS")?.trim()
@@ -43,18 +43,18 @@ Deno.serve(async (req) => {
     : [];
 
   if (rawSecrets.length === 0) {
-    return jsonResponse({ error: "Webhook signing secret not configured" }, 503);
+    return jsonResponse({ error: "Webhook signing secret not configured" }, 503, req);
   }
 
   const sigHeader = req.headers.get("teller-signature") ?? "";
   const m = /^t=(\d+),/.exec(sigHeader);
   if (!m) {
-    return jsonResponse({ error: "Missing Teller-Signature" }, 400);
+    return jsonResponse({ error: "Missing Teller-Signature" }, 400, req);
   }
   const t = parseInt(m[1], 10);
   const now = Math.floor(Date.now() / 1000);
   if (Math.abs(now - t) > 180) {
-    return jsonResponse({ error: "Stale signature timestamp" }, 400);
+    return jsonResponse({ error: "Stale signature timestamp" }, 400, req);
   }
 
   const bodyStr = await req.text();
@@ -62,7 +62,7 @@ Deno.serve(async (req) => {
 
   const v1Sigs = [...sigHeader.matchAll(/v1=([^,]+)/g)].map((x) => x[1].trim());
   if (v1Sigs.length === 0) {
-    return jsonResponse({ error: "No v1 signatures" }, 400);
+    return jsonResponse({ error: "No v1 signatures" }, 400, req);
   }
 
   let matched = false;
@@ -89,14 +89,14 @@ Deno.serve(async (req) => {
   }
 
   if (!matched) {
-    return jsonResponse({ error: "Invalid signature" }, 401);
+    return jsonResponse({ error: "Invalid signature" }, 401, req);
   }
 
   let payload: { type?: string; payload?: { enrollment_id?: string } };
   try {
     payload = JSON.parse(bodyStr);
   } catch {
-    return jsonResponse({ error: "Invalid JSON body" }, 400);
+    return jsonResponse({ error: "Invalid JSON body" }, 400, req);
   }
 
   if (payload.type === "enrollment.disconnected") {
@@ -107,5 +107,5 @@ Deno.serve(async (req) => {
     }
   }
 
-  return jsonResponse({ received: true });
+  return jsonResponse({ received: true }, 200, req);
 });

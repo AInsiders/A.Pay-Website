@@ -3,16 +3,16 @@ import { supabaseServiceClient, supabaseUserClient } from "../_shared/supabase.t
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return preflightResponse();
+    return preflightResponse(req);
   }
   if (req.method !== "POST") {
-    return jsonResponse({ error: "Method not allowed" }, 405);
+    return jsonResponse({ error: "Method not allowed" }, 405, req);
   }
 
   const userClient = supabaseUserClient(req);
   const { data: userData, error: userErr } = await userClient.auth.getUser();
   if (userErr || !userData.user) {
-    return jsonResponse({ error: "Unauthorized" }, 401);
+    return jsonResponse({ error: "Unauthorized" }, 401, req);
   }
 
   const bytes = crypto.getRandomValues(new Uint8Array(32));
@@ -26,8 +26,8 @@ Deno.serve(async (req) => {
     expires_at: expires,
   });
   if (insErr) {
-    return jsonResponse({ error: insErr.message }, 500);
+    return jsonResponse({ error: insErr.message }, 500, req);
   }
 
-  return jsonResponse({ nonce });
+  return jsonResponse({ nonce }, 200, req);
 });
