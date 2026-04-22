@@ -3365,16 +3365,18 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
   return `
     <div class="fx-auth-modal fx-auth-modal--open" role="dialog" aria-modal="true" aria-labelledby="settings-editor-title">
       <button type="button" class="fx-auth-modal__backdrop" data-settings-editor-cancel aria-label="Close"></button>
-      <div class="fx-auth-modal__panel" style="max-width:620px">
+      <div class="fx-auth-modal__panel fx-form-modal-panel">
         <div class="fx-auth-modal__chrome">
           <h2 id="settings-editor-title" class="fx-auth-modal__title">${escapeHtml(title)}</h2>
           <button type="button" class="fx-auth-modal__close" data-settings-editor-cancel aria-label="Close">×</button>
         </div>
-        <form id="form-settings-editor" class="fx-auth-modal__form list" data-editor-kind="${editor.kind}" data-editor-id="${escapeAttr((editor as { id?: string }).id ?? "")}">
-          ${body}
-          ${renderEditorFooterButtons(busy, deletable)}
-          ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
-        </form>
+        <div class="fx-form-modal-body">
+          <form id="form-settings-editor" class="fx-auth-modal__form list fx-settings-editor-form" data-editor-kind="${editor.kind}" data-editor-id="${escapeAttr((editor as { id?: string }).id ?? "")}">
+            ${body}
+            ${renderEditorFooterButtons(busy, deletable)}
+            ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
+          </form>
+        </div>
       </div>
     </div>
   `;
@@ -3662,11 +3664,12 @@ function renderCategorizeOverlay(snap: PlannerSnapshot | null): string {
   return `
     <div class="fx-auth-modal fx-auth-modal--open" role="dialog" aria-modal="true" aria-labelledby="categorize-title">
       <button type="button" class="fx-auth-modal__backdrop" data-categorize-cancel aria-label="Close"></button>
-      <div class="fx-auth-modal__panel" style="max-width:640px">
+      <div class="fx-auth-modal__panel fx-form-modal-panel fx-form-modal-panel--wide">
         <div class="fx-auth-modal__chrome">
           <h2 id="categorize-title" class="fx-auth-modal__title">Tag this transaction</h2>
           <button type="button" class="fx-auth-modal__close" data-categorize-cancel aria-label="Close">×</button>
         </div>
+        <div class="fx-form-modal-body">
         <form id="form-categorize" class="fx-auth-modal__form list">
           <div class="fx-mini-list" style="margin:0 0 6px">
             <article class="fx-mini-list__item">
@@ -3705,6 +3708,7 @@ function renderCategorizeOverlay(snap: PlannerSnapshot | null): string {
           </div>
           ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
         </form>
+        </div>
       </div>
     </div>
   `;

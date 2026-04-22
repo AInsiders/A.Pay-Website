@@ -16,6 +16,16 @@
   --radius-sm: 12px;
   --font: "Outfit", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  /* Scrollbars + HUD inputs (settings / modals) */
+  --scrollbar-track: rgba(4, 10, 22, 0.55);
+  --scrollbar-thumb: color-mix(in srgb, var(--accent) 58%, rgba(99, 102, 241, 0.55));
+  --input-surface: linear-gradient(
+    155deg,
+    color-mix(in srgb, var(--accent) 14%, rgba(6, 10, 24, 0.92)) 0%,
+    rgba(4, 8, 18, 0.88) 48%,
+    color-mix(in srgb, #6366f1 10%, rgba(5, 8, 16, 0.9)) 100%
+  );
+  --input-border: color-mix(in srgb, var(--accent) 28%, var(--border));
 }
 
 /* Signed-in theme mode */
@@ -28,6 +38,14 @@
   --border-glow: color-mix(in srgb, var(--accent) 28%, transparent);
   --text: #0b1020;
   --muted: rgba(15, 23, 42, 0.62);
+  --scrollbar-track: rgba(241, 245, 249, 0.9);
+  --scrollbar-thumb: color-mix(in srgb, var(--accent) 42%, rgba(100, 116, 139, 0.55));
+  --input-surface: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--accent) 10%, rgba(255, 255, 255, 0.98)) 0%,
+    rgba(248, 250, 252, 0.96) 100%
+  );
+  --input-border: color-mix(in srgb, var(--accent) 32%, var(--border));
 }
 
 *,
@@ -47,6 +65,57 @@ body {
   color: var(--text);
   background: var(--bg-deep);
   overflow-x: hidden;
+}
+
+/* Thin, tinted scrollbars (Firefox + WebKit) */
+html {
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+html::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+html::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+  border-radius: 999px;
+}
+
+html::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--scrollbar-thumb), color-mix(in srgb, #6366f1 40%, var(--scrollbar-thumb)));
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.fx-form-modal-body,
+.fx-seg--wrap,
+.fx-splits {
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+.fx-form-modal-body::-webkit-scrollbar,
+.fx-seg--wrap::-webkit-scrollbar,
+.fx-splits::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.fx-form-modal-body::-webkit-scrollbar-thumb,
+.fx-seg--wrap::-webkit-scrollbar-thumb,
+.fx-splits::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--scrollbar-thumb), color-mix(in srgb, var(--accent) 30%, #6366f1));
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.fx-form-modal-body::-webkit-scrollbar-track,
+.fx-seg--wrap::-webkit-scrollbar-track,
+.fx-splits::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+  border-radius: 999px;
 }
 
 :root[data-mode="light"] .fx-root::before {
@@ -71,6 +140,30 @@ body {
 :root[data-mode="light"] .card,
 :root[data-mode="light"] .tx {
   box-shadow: 0 18px 40px -28px rgba(2, 6, 23, 0.35);
+}
+
+:root[data-mode="light"] input[type="email"],
+:root[data-mode="light"] input[type="password"],
+:root[data-mode="light"] input[type="text"],
+:root[data-mode="light"] input[type="number"],
+:root[data-mode="light"] input[type="date"],
+:root[data-mode="light"] input[type="datetime-local"],
+:root[data-mode="light"] input[type="search"],
+:root[data-mode="light"] input[type="url"],
+:root[data-mode="light"] textarea {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
+}
+
+:root[data-mode="light"] .fx-seg--wrap {
+  background: color-mix(in srgb, var(--accent) 9%, rgba(255, 255, 255, 0.72));
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+}
+
+:root[data-mode="light"] .fx-panel {
+  background:
+    radial-gradient(100% 90% at 100% 0%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 50%),
+    linear-gradient(165deg, rgba(255, 255, 255, 0.98) 0%, color-mix(in srgb, var(--accent) 5%, #f1f5f9) 100%);
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
 }
 
 .fx-seg {
@@ -110,6 +203,15 @@ body {
   flex-wrap: wrap;
   max-width: 100%;
   justify-content: flex-start;
+  max-height: min(42vh, 220px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 2px 6px 2px 2px;
+  margin: 2px 0 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, rgba(0, 0, 0, 0.2));
 }
 
 .fx-seg--wrap .fx-seg__btn {
@@ -120,12 +222,22 @@ body {
 .field.field--choice {
   display: grid;
   gap: 10px;
+  padding: 14px 14px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--border));
+  background:
+    linear-gradient(160deg, color-mix(in srgb, var(--accent) 8%, rgba(255, 255, 255, 0.03)), rgba(0, 0, 0, 0.12));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+:root[data-mode="light"] .field.field--choice {
+  background: color-mix(in srgb, var(--accent) 7%, rgba(255, 255, 255, 0.88));
 }
 
 .field.field--choice .field__legend {
   font-size: 0.82rem;
   font-weight: 650;
-  color: var(--text);
+  color: color-mix(in srgb, var(--accent) 35%, var(--text));
   letter-spacing: 0.01em;
 }
 
@@ -135,24 +247,30 @@ body {
   max-width: 100%;
   padding: 12px 42px 12px 14px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background-color: var(--surface-2);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%238b95a8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
-  background-position: right 10px center;
-  background-size: 20px 20px;
-  background-repeat: no-repeat;
+  border: 1px solid var(--input-border);
   color: var(--text);
   font-family: inherit;
   font-size: 1rem;
   font-weight: 500;
   cursor: pointer;
   appearance: none;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%238b95a8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")
+      right 10px center / 20px 20px no-repeat,
+    var(--input-surface);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 :root[data-mode="light"] .fx-select,
 :root[data-mode="light"] #form-settings-editor select {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")
+      right 10px center / 20px 20px no-repeat,
+    var(--input-surface);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
 }
 
 .fx-select:hover,
@@ -428,6 +546,56 @@ body {
 
 .fx-auth-modal__form {
   padding: 0 22px 22px;
+}
+
+/* Wide scrollable form modals (settings editor, tag transaction) */
+.fx-auth-modal__panel.fx-form-modal-panel {
+  width: min(620px, 94vw);
+  max-width: min(620px, 94vw);
+  max-height: min(90dvh, 780px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background:
+    radial-gradient(120% 100% at 0% 0%, color-mix(in srgb, var(--accent) 24%, transparent), transparent 52%),
+    radial-gradient(90% 70% at 100% 100%, color-mix(in srgb, #6366f1 18%, transparent), transparent 55%),
+    linear-gradient(168deg, rgba(14, 20, 44, 0.98) 0%, rgba(6, 10, 24, 0.96) 55%, rgba(4, 8, 18, 0.98) 100%);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 32px 88px -28px rgba(0, 0, 0, 0.72),
+    0 0 140px -36px color-mix(in srgb, var(--accent) 42%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.fx-auth-modal__panel.fx-form-modal-panel--wide {
+  width: min(680px, 96vw);
+  max-width: min(680px, 96vw);
+}
+
+.fx-form-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: min(72dvh, 640px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 0 4px 2px 0;
+  margin-right: 2px;
+}
+
+.fx-form-modal-panel .fx-auth-modal__form {
+  padding: 4px 16px 22px 22px;
+}
+
+:root[data-mode="light"] .fx-auth-modal__panel.fx-form-modal-panel {
+  background:
+    radial-gradient(110% 90% at 0% 0%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 50%),
+    linear-gradient(168deg, rgba(255, 255, 255, 0.98) 0%, color-mix(in srgb, var(--accent) 6%, #f8fafc) 100%);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 12%, rgba(15, 23, 42, 0.08)),
+    0 28px 64px -32px rgba(15, 23, 42, 0.2),
+    0 0 80px -40px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
 .fx-doc {
@@ -779,10 +947,23 @@ body {
   display: flex;
   justify-content: space-between;
   gap: 14px;
-  padding: 12px 14px;
+  padding: 12px 14px 12px 16px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  background:
+    linear-gradient(105deg, color-mix(in srgb, var(--accent) 14%, transparent) 0%, transparent 38%),
+    linear-gradient(165deg, rgba(255, 255, 255, 0.05), rgba(0, 0, 0, 0.18));
+  box-shadow:
+    inset 3px 0 0 color-mix(in srgb, var(--accent) 65%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 5%, transparent);
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
+}
+
+.fx-mini-list__item:hover {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  box-shadow:
+    inset 3px 0 0 var(--accent),
+    0 12px 32px -22px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .fx-mini-list__item strong {
@@ -1146,15 +1327,19 @@ body {
 
 /* Panels */
 .fx-panel {
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background:
+    radial-gradient(110% 100% at 100% -10%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 48%),
+    radial-gradient(80% 60% at 0% 100%, color-mix(in srgb, #6366f1 10%, transparent), transparent 45%),
+    var(--surface);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
   border-radius: var(--radius);
   padding: 22px 22px 20px;
   margin-bottom: 18px;
   backdrop-filter: blur(18px);
   box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent),
-    0 24px 48px -28px rgba(0, 0, 0, 0.75);
+    0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent),
+    0 24px 52px -28px rgba(0, 0, 0, 0.78),
+    0 0 64px -36px color-mix(in srgb, var(--accent) 18%, transparent);
   position: relative;
   overflow: hidden;
 }
@@ -1227,22 +1412,47 @@ label.field {
 
 input[type="email"],
 input[type="password"],
-input[type="text"] {
+input[type="text"],
+input[type="number"],
+input[type="date"],
+input[type="datetime-local"],
+input[type="search"],
+input[type="url"],
+textarea {
   width: 100%;
   padding: 12px 14px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--input-border);
+  background: var(--input-surface);
   color: var(--text);
   font-family: inherit;
   font-size: 1rem;
   transition: border-color 0.2s, box-shadow 0.2s;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 0 1px color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
-input:focus {
+input:disabled,
+textarea:disabled {
+  opacity: 0.72;
+  cursor: not-allowed;
+  filter: saturate(0.85);
+}
+
+textarea {
+  min-height: 88px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+input:focus,
+textarea:focus {
   outline: none;
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  box-shadow: 0 0 0 3px var(--accent-dim);
+  box-shadow:
+    0 0 0 3px var(--accent-dim),
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
 /* Theme presets (signed-in) */
@@ -1260,13 +1470,15 @@ input:focus {
   gap: 8px;
   padding: 12px 14px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--accent) 12%, rgba(255, 255, 255, 0.04)), rgba(0, 0, 0, 0.2));
   cursor: pointer;
   text-align: left;
   font-family: inherit;
   color: var(--text);
   transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .fx-theme-preset:hover {
@@ -1305,9 +1517,12 @@ input:focus {
   height: 48px;
   padding: 4px;
   border-radius: 12px;
-  border: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: var(--input-surface);
   cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 0 24px -8px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .fx-color-row .field {
@@ -1336,8 +1551,16 @@ button:hover:not(:disabled) {
 }
 
 button.secondary {
-  background: transparent;
-  box-shadow: none;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 20px -12px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+:root[data-mode="light"] button.secondary {
+  background: color-mix(in srgb, var(--accent) 10%, rgba(255, 255, 255, 0.92));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95);
 }
 
 button.danger {
@@ -1356,9 +1579,12 @@ button:disabled {
 .card {
   padding: 16px 18px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: linear-gradient(145deg, rgba(255, 255, 255, 0.04), rgba(0, 0, 0, 0.2));
-  transition: border-color 0.2s;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 10%, rgba(255, 255, 255, 0.05)) 0%, transparent 42%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.05), rgba(0, 0, 0, 0.22));
+  transition: border-color 0.2s, box-shadow 0.2s;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
 .card:hover {
@@ -1458,6 +1684,14 @@ button:disabled {
   flex-direction: column;
   gap: 10px;
   margin: 4px 0 4px;
+  max-height: min(38vh, 280px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 6px 8px 8px 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 14%, var(--border));
+  background: color-mix(in srgb, var(--accent) 5%, rgba(0, 0, 0, 0.2));
 }
 
 .fx-splits__row {
@@ -1501,10 +1735,14 @@ button:disabled {
   display: flex;
   gap: 14px;
   flex-wrap: wrap;
-  padding: 10px 12px;
+  padding: 12px 14px;
   border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--border));
+  background:
+    linear-gradient(120deg, color-mix(in srgb, var(--accent) 10%, transparent), transparent 55%),
+    rgba(255, 255, 255, 0.04);
   font-size: 0.9rem;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .fx-splits__totals strong {
@@ -2040,8 +2278,10 @@ a {
 
 /* Flatter supporting panel variant for low-priority content. */
 .fx-panel--flat {
-  background: rgba(255, 255, 255, 0.02);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 8%, rgba(255, 255, 255, 0.03)), rgba(0, 0, 0, 0.12));
   border-style: dashed;
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
   padding: 14px 16px;
 }
 
@@ -2104,12 +2344,18 @@ a {
   text-decoration: none;
   color: inherit;
   border-radius: 18px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent),
+    0 16px 40px -28px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 .fx-settings-group-card:hover {
-  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
-  box-shadow: 0 12px 36px -24px color-mix(in srgb, var(--accent) 35%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  transform: translateY(-2px);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent),
+    0 20px 48px -22px color-mix(in srgb, var(--accent) 42%, transparent);
 }
 
 .fx-settings-leaf-row {
@@ -2117,10 +2363,18 @@ a {
   text-decoration: none;
   color: inherit;
   border-radius: 14px;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
 }
 
 .fx-settings-leaf-row:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: linear-gradient(
+    105deg,
+    color-mix(in srgb, var(--accent) 12%, rgba(255, 255, 255, 0.04)),
+    rgba(255, 255, 255, 0.02)
+  );
+  box-shadow:
+    inset 3px 0 0 color-mix(in srgb, var(--accent) 70%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 18%, var(--border));
 }
 
 .fx-inline-link {
