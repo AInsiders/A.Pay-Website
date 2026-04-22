@@ -992,6 +992,34 @@ export async function upsertBankTransaction(userId: string, tx: {
   amount: number;
   postedDate?: string;
 }) {
+  // Stable identity: one row per (account, provider id) so tags and categorizations
+  // always attach to the same bank_transactions.id across refreshes.
+  if (tx.providerTransactionId && tx.bankAccountId) {
+    const { data: existing, error: selErr } = await supabase
+      .from("bank_transactions")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("bank_account_id", tx.bankAccountId)
+      .eq("provider_transaction_id", tx.providerTransactionId)
+      .maybeSingle();
+    if (selErr) throw new Error(selErr.message);
+    const existingId = existing ? String((existing as Record<string, unknown>).id ?? "") : "";
+    if (existingId) {
+      const { error } = await supabase
+        .from("bank_transactions")
+        .update({
+          description: tx.description,
+          merchant: tx.merchant ?? null,
+          amount: tx.amount,
+          posted_date: tx.postedDate ?? null,
+        })
+        .eq("user_id", userId)
+        .eq("id", existingId);
+      if (error) throw new Error(error.message);
+      return existingId;
+    }
+  }
+
   const id = tx.id ?? newId();
   const { error } = await supabase.from("bank_transactions").upsert(withUser(userId, {
     id,
@@ -1004,6 +1032,38 @@ export async function upsertBankTransaction(userId: string, tx: {
   }));
   if (error) throw new Error(error.message);
   return id;
+}
+
+/**
+ * After linking a bank charge to a bill, adjust `bills.current_amount_due` so the
+ * planner reflects what is still owed. `BY_AMOUNT` subtracts the tagged payment;
+ * `CLEAR_DUE` zeros the current cycle (user says this payment closes the bill for now).
+ */
+export async function applyBillPaymentAccounting(
+  userId: string,
+  billId: string,
+  paidAmount: number,
+  mode: "BY_AMOUNT" | "CLEAR_DUE",
+): Promise<void> {
+  const { data, error } = await supabase
+    .from("bills")
+    .select("current_amount_due, status")
+    .eq("user_id", userId)
+    .eq("id", billId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  const row = data as Record<string, unknown> | null;
+  if (!row) return;
+  const cur = numOr(row.current_amount_due, 0);
+  const next = mode === "CLEAR_DUE" ? 0 : Math.max(0, cur - Math.abs(paidAmount));
+  const prevStatus = String(row.status ?? "UPCOMING");
+  const status = next <= 0 ? (prevStatus === "OVERDUE" ? "UPCOMING" : "UPCOMING") : "PARTIAL";
+  const { error: uerr } = await supabase
+    .from("bills")
+    .update({ current_amount_due: next, status })
+    .eq("user_id", userId)
+    .eq("id", billId);
+  if (uerr) throw new Error(uerr.message);
 }
 
 /** Upsert a user override categorization for a transaction. */

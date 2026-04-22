@@ -51,6 +51,7 @@ import {
   saveUserCategory,
   loadTransactionAssignments,
   linkTransactionSplitsToPlannerActuals,
+  applyBillPaymentAccounting,
   upsertCategoryRuleFromAdjustment,
   type PlannerActualTarget,
   type PlannerBackupPackage,
@@ -452,6 +453,10 @@ const state: {
   recoveryMode: boolean;
   /** Currently open form editor on Settings (bill/income/etc) or null. */
   settingsEditor: SettingsEditorState | null;
+  /** True while the settings editor form is submitting (avoid disabling Save during unrelated recomputes). */
+  settingsEditorSubmitting: boolean;
+  /** True while the transaction tag dialog is saving. */
+  categorizeSubmitting: boolean;
   /** Currently open "adjust category" dialog for a synced bank transaction. */
   categorizeEditor: {
     txId: string;
@@ -487,6 +492,8 @@ const state: {
   authModalOpen: false,
   recoveryMode: false,
   settingsEditor: null,
+  settingsEditorSubmitting: false,
+  categorizeSubmitting: false,
   categorizeEditor: null,
 };
 
@@ -914,6 +921,7 @@ async function loadTransactions() {
     if (payload?.error) throw new Error(payload.error);
     state.transactions = payload.transactions ?? [];
     await autoCategorizeTransactionsAndReplan(state.transactions as unknown[]);
+    await hydrateCanonicalTransactionIds(state.session.user.id, state.selectedAccountId);
     await refreshTxAssignmentCache();
   } catch (e) {
     state.error = formatAuthError("Transaction load", e, { edgeFunction: "teller-data" });
@@ -1036,6 +1044,44 @@ async function refreshTxAssignmentCache(): Promise<void> {
     state.txAssignments = out;
   } catch (e) {
     console.warn("failed to load transaction assignments", e);
+  }
+}
+
+/**
+ * Edge returns Teller-shaped rows whose `id` is the provider transaction id.
+ * `bank_transactions` rows (and all `transaction_*` tables) use our internal UUID.
+ * Patch the in-memory list so tagging + assignment cache use the same id.
+ */
+async function hydrateCanonicalTransactionIds(userId: string, bankAccountId: string): Promise<void> {
+  const list = state.transactions as Record<string, unknown>[];
+  if (list.length === 0) return;
+  const providerIds = list
+    .map((t) => String(t.id ?? ""))
+    .filter((id) => id.length > 0);
+  if (providerIds.length === 0) return;
+  try {
+    const { data, error } = await supabase
+      .from("bank_transactions")
+      .select("id, provider_transaction_id")
+      .eq("user_id", userId)
+      .eq("bank_account_id", bankAccountId)
+      .in("provider_transaction_id", providerIds);
+    if (error) throw error;
+    const map = new Map<string, string>();
+    for (const raw of data ?? []) {
+      const r = raw as Record<string, unknown>;
+      const pid = String(r.provider_transaction_id ?? "");
+      const id = String(r.id ?? "");
+      if (pid && id) map.set(pid, id);
+    }
+    state.transactions = list.map((t) => {
+      const pid = String(t.id ?? "");
+      const canon = map.get(pid);
+      if (!canon) return t;
+      return { ...t, id: canon, provider_transaction_id: pid };
+    });
+  } catch (e) {
+    console.warn("hydrateCanonicalTransactionIds failed", e);
   }
 }
 
@@ -3112,7 +3158,7 @@ function renderSettingsProfileSection(profile: Profile | null, accent: string, m
 // Editor dialogs (rendered as an overlay when state.settingsEditor is set)
 // ========================================================================
 
-function renderEditorFooterButtons(busy: boolean, deletable: boolean): string {
+function renderEditorFooterButtons(submitting: boolean, deletable: boolean): string {
   return `
     <div class="row" style="justify-content:space-between;margin-top:12px">
       <div class="row">
@@ -3120,7 +3166,7 @@ function renderEditorFooterButtons(busy: boolean, deletable: boolean): string {
       </div>
       <div class="row">
         <button type="button" class="secondary" data-settings-editor-cancel>Cancel</button>
-        <button type="submit" ${busy ? "disabled" : ""}>Save</button>
+        <button type="submit" ${submitting ? "disabled" : ""}>${submitting ? "Saving…" : "Save"}</button>
       </div>
     </div>
   `;
@@ -3176,7 +3222,7 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
   if (!editor) return "";
   if (!snap && editor.kind !== "housing" && editor.kind !== "planner-settings") return "";
 
-  const busy = state.normalizedSnapshotBusy;
+  const submitting = state.settingsEditorSubmitting;
   const find = <T extends { id: string }>(arr: T[] | undefined, id?: string) => arr?.find((x) => x.id === id);
 
   let title = "Editor";
@@ -3424,7 +3470,7 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
         <div class="fx-form-modal-body">
           <form id="form-settings-editor" class="fx-auth-modal__form list fx-settings-editor-form" data-editor-kind="${editor.kind}" data-editor-id="${escapeAttr((editor as { id?: string }).id ?? "")}">
             ${body}
-            ${renderEditorFooterButtons(busy, deletable)}
+            ${renderEditorFooterButtons(submitting, deletable)}
             ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
           </form>
         </div>
@@ -3706,7 +3752,7 @@ function renderSplitRow(
 function renderCategorizeOverlay(snap: PlannerSnapshot | null): string {
   const c = state.categorizeEditor;
   if (!c) return "";
-  const busy = state.normalizedSnapshotBusy;
+  const submitting = state.categorizeSubmitting;
   const transactionAmount = Math.abs(c.amount);
   const isCredit = c.amount > 0;
   const splitsTotal = c.splits.reduce((sum, s) => sum + (Number.isFinite(s.amount) ? Math.abs(s.amount) : 0), 0);
@@ -3723,6 +3769,41 @@ function renderCategorizeOverlay(snap: PlannerSnapshot | null): string {
 
   const hasSingleCategory = c.splits.length === 1 && c.splits[0].target !== "UNCATEGORIZED:";
   const displayLabel = c.merchant || c.description;
+  const hasAnyBillSplit =
+    !isCredit && c.splits.some((row) => parseSplitTarget(row.target).kind === "BILL");
+  const billSplitTotal = c.splits.reduce((sum, row) => {
+    if (parseSplitTarget(row.target).kind !== "BILL") return sum;
+    const a = Number.isFinite(row.amount) ? Math.abs(row.amount) : 0;
+    return sum + a;
+  }, 0);
+  const exactlyOneRowOneBill =
+    c.splits.length === 1 && parseSplitTarget(c.splits[0].target).kind === "BILL";
+  const billTagAmountLabel = money(billSplitTotal);
+  let billDueFromSetup = "";
+  if (snap && exactlyOneRowOneBill) {
+    const bt = parseSplitTarget(c.splits[0].target);
+    if (bt.kind === "BILL" && "id" in bt) {
+      const b = snap.bills.find((x) => x.id === bt.id);
+      if (b) {
+        billDueFromSetup = `<p class="muted" style="margin:8px 0 0;font-size:0.88rem">From your setup: <strong>${escapeHtml(b.name)}</strong> — <strong>${money(b.currentAmountDue)}</strong> currently due (planner line item; not your whole long-term balance).</p>`;
+      }
+    }
+  }
+  const billPaymentApplyHtml = hasAnyBillSplit
+    ? `
+          <div class="field" style="margin-top:10px;padding:12px 14px;border:1px solid var(--border);border-radius:12px">
+            <label class="fx-checkbox" style="margin:0">
+              <input type="checkbox" name="billFullPayment" />
+              <span><strong>Current due is fully handled</strong> · ${billTagAmountLabel} tagged${exactlyOneRowOneBill ? " to this bill" : " to bills"}</span>
+            </label>
+            ${billDueFromSetup}
+            <p class="muted" style="margin:10px 0 0;font-size:0.88rem;line-height:1.45">
+              This uses <strong>amount currently due</strong> from <strong>Settings → Bills</strong> (what the planner treats as “owed next”), <em>not</em> a long-term balance like a full account payoff.
+              <strong> On:</strong> set that due to <strong>$0</strong> for each tagged bill—use when this charge fully settles what you owe <em>for now</em>, even if the bank amount is a few cents over or under the due you entered (the transaction still records <strong>only what the bank posted</strong>).
+              <strong> Off:</strong> subtract only the tagged amount(s); any remainder stays as due on the bill.
+            </p>
+          </div>`
+    : "";
 
   return `
     <div class="fx-auth-modal fx-auth-modal--open" role="dialog" aria-modal="true" aria-labelledby="categorize-title">
@@ -3758,6 +3839,8 @@ function renderCategorizeOverlay(snap: PlannerSnapshot | null): string {
             <span>Remaining: <strong>${money(remaining)}</strong></span>
           </div>
 
+          ${billPaymentApplyHtml}
+
           <label class="field">Note (optional)<input data-categorize-note value="${escapeAttr(c.note)}" placeholder="e.g. Split between rent and utilities" /></label>
 
           <label class="field fx-checkbox" data-categorize-learn-row ${hasSingleCategory ? "" : `style="display:none"`}>
@@ -3767,7 +3850,7 @@ function renderCategorizeOverlay(snap: PlannerSnapshot | null): string {
 
           <div class="row" style="justify-content:flex-end;margin-top:12px">
             <button type="button" class="secondary" data-categorize-cancel>Cancel</button>
-            <button type="submit" ${busy ? "disabled" : ""}>${busy ? "Saving…" : "Save"}</button>
+            <button type="submit" ${submitting ? "disabled" : ""}>${submitting ? "Saving…" : "Save"}</button>
           </div>
           ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
         </form>
@@ -4526,6 +4609,7 @@ function wireCategorizeButtons() {
 
   document.querySelector<HTMLFormElement>("#form-categorize")?.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (state.categorizeSubmitting) return;
     syncSplitsFromForm();
     const c = state.categorizeEditor;
     const userId = state.session?.user?.id;
@@ -4556,6 +4640,9 @@ function wireCategorizeButtons() {
     const primary = cleanSplits[0];
     const primaryTarget = parseSplitTarget(primary.target);
 
+    state.categorizeSubmitting = true;
+    render();
+    try {
     await withRecompute(async () => {
       // Primary categorization row for quick display / legacy readers.
       await saveTransactionCategorization(userId, {
@@ -4611,6 +4698,21 @@ function wireCategorizeButtons() {
       }));
       await linkTransactionSplitsToPlannerActuals(userId, c.txId, actuals, txRef, "Manual");
 
+      const fullPaymentOn =
+        form.querySelector<HTMLInputElement>('input[name="billFullPayment"]')?.checked === true;
+      const debitWithAnyBill =
+        c.amount < 0 &&
+        cleanSplits.some((row) => {
+          const pt = parseSplitTarget(row.target);
+          return pt.kind === "BILL" && "id" in pt;
+        });
+      for (const s of cleanSplits) {
+        const t = parseSplitTarget(s.target);
+        if (t.kind !== "BILL" || !("id" in t)) continue;
+        const mode = debitWithAnyBill && fullPaymentOn ? "CLEAR_DUE" : "BY_AMOUNT";
+        await applyBillPaymentAccounting(userId, t.id, s.amount, mode);
+      }
+
       // Teach auto-categorize — only for the single-category case to avoid guessing splits.
       if (learnAlways && !isSplit && primaryTarget.kind !== "UNCATEGORIZED" && primaryTarget.kind !== "CASH_IN" && primaryTarget.kind !== "CASH_OUT") {
         const matcherValue = (c.merchant || c.description || "").trim();
@@ -4634,6 +4736,9 @@ function wireCategorizeButtons() {
 
     await refreshTxAssignmentCache();
     state.categorizeEditor = null;
+    } finally {
+      state.categorizeSubmitting = false;
+    }
     render();
   });
 }
@@ -4735,10 +4840,14 @@ function wireSettingsEditorButtons() {
 }
 
 async function submitSettingsEditor(form: HTMLFormElement) {
+  if (state.settingsEditorSubmitting) return;
   const kind = form.getAttribute("data-editor-kind") as SettingsEditorState["kind"] | null;
   const id = form.getAttribute("data-editor-id") || undefined;
   const userId = state.session?.user?.id;
   if (!kind || !userId) return;
+  state.settingsEditorSubmitting = true;
+  state.error = null;
+  render();
   const fd = new FormData(form);
   const getStr = (k: string) => String(fd.get(k) ?? "").trim();
   const getNum = (k: string) => {
@@ -4754,7 +4863,9 @@ async function submitSettingsEditor(form: HTMLFormElement) {
     intervalDays: getNum(`${prefix}_intervalDays`) ?? undefined,
   });
 
-  const result = await withRecompute(async () => {
+  let result: unknown = null;
+  try {
+    result = await withRecompute(async () => {
     switch (kind) {
       case "bill":
         await saveBill(userId, {
@@ -4867,6 +4978,10 @@ async function submitSettingsEditor(form: HTMLFormElement) {
         break;
     }
   }, "Saved and recomputed.");
+  } finally {
+    state.settingsEditorSubmitting = false;
+    render();
+  }
 
   if (result !== null) {
     state.settingsEditor = null;
