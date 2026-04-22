@@ -237,6 +237,22 @@ function settingsHashFor(nav: SettingsNav): string {
 
 const APP_ONLY_ROUTES = new Set<RouteId>(["planner", "bills", "accounts", "settings"]);
 const APP_PRIMARY_ROUTES = new Set<RouteId>(["home", "planner", "bills", "accounts", "settings"]);
+
+const GUEST_HEADER_LINKS: { route: RouteId; label: string }[] = [
+  { route: "home", label: "Home" },
+  { route: "about", label: "About" },
+  { route: "contact", label: "Contact" },
+  { route: "privacy", label: "Privacy" },
+  { route: "terms", label: "Terms" },
+];
+
+const APP_HEADER_LINKS: { route: RouteId; label: string }[] = [
+  { route: "home", label: "Home" },
+  { route: "planner", label: "Planner" },
+  { route: "bills", label: "Bills" },
+  { route: "accounts", label: "Accounts" },
+  { route: "settings", label: "Settings" },
+];
 const PLANNER_SNAPSHOT_SELECT =
   "id, user_id, plan, snapshot, created_at, updated_at, source_platform, source_app_version, source_updated_at, planner_schema_version, planner_engine_version";
 
@@ -1548,15 +1564,13 @@ function renderAuth() {
   })();
   const disabled = state.busy || !isSupabaseConfigured;
   const route = state.route;
-  const guestNav = `
-    <nav class="fx-app-nav" aria-label="Site">
-      ${guestNavLink("home", "Home", route)}
-      ${guestNavLink("about", "About", route)}
-      ${guestNavLink("contact", "Contact", route)}
-      ${guestNavLink("privacy", "Privacy", route)}
-      ${guestNavLink("terms", "Terms", route)}
-    </nav>
-  `;
+  const guestNavBlock = renderHeaderNavigation(
+    "guest",
+    route,
+    `<div class="fx-nav-drawer__extras">
+        <button type="button" class="secondary fx-nav-drawer__cta" id="btn-open-auth-drawer">Sign in</button>
+      </div>`,
+  );
   return `
     <div class="fx-root">
       <div class="fx-grid" aria-hidden="true"></div>
@@ -1572,7 +1586,7 @@ function renderAuth() {
               <span class="fx-brand__tag">Forecast &amp; cash</span>
             </div>
           </div>
-          ${guestNav}
+          ${guestNavBlock}
           <div class="fx-header__actions">
             <button type="button" id="btn-open-auth">Sign in</button>
           </div>
@@ -1676,6 +1690,36 @@ function appNavLink(route: RouteId, label: string, current: RouteId) {
   const active = current === route ? " is-active" : "";
   const href = route === "home" ? "#/" : `#/${route}`;
   return `<a class="fx-app-nav__link${active}" href="${href}" data-app-route="${route}">${escapeHtml(label)}</a>`;
+}
+
+/** Burger + slide-out drawer (mobile / tablet) and centered pill nav (desktop). */
+function renderHeaderNavigation(
+  mode: "guest" | "app",
+  highlightRoute: RouteId,
+  extrasHtml: string,
+): string {
+  const items = mode === "guest" ? GUEST_HEADER_LINKS : APP_HEADER_LINKS;
+  const link = mode === "guest" ? guestNavLink : appNavLink;
+  const ariaLabel = mode === "guest" ? "Site" : "App navigation";
+  const linksHtml = items.map((it) => link(it.route, it.label, highlightRoute)).join("");
+  return `
+    <div class="fx-nav-shell">
+      <button type="button" class="fx-nav-toggle" id="btn-mobile-nav" aria-expanded="false" aria-controls="fx-nav-drawer" aria-label="Open menu">
+        <span class="fx-nav-toggle__icon" aria-hidden="true"></span>
+      </button>
+      <div class="fx-nav-drawer" id="fx-nav-drawer" aria-label="${escapeHtml(ariaLabel)}">
+        <button type="button" class="fx-nav-drawer__backdrop" id="btn-mobile-nav-backdrop" tabindex="-1" aria-label="Close menu"></button>
+        <div class="fx-nav-drawer__panel">
+          <div class="fx-nav-drawer__head">
+            <span class="fx-nav-drawer__title">Menu</span>
+            <button type="button" class="fx-nav-drawer__close" id="btn-mobile-nav-close" aria-label="Close menu">×</button>
+          </div>
+          <nav class="fx-app-nav" aria-label="${escapeHtml(ariaLabel)}">${linksHtml}</nav>
+          ${extrasHtml}
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function renderStringList(items: string[], emptyCopy: string) {
@@ -3529,15 +3573,14 @@ function renderApp() {
     : "";
 
   const routeForNav = APP_PRIMARY_ROUTES.has(state.route) ? state.route : "home";
-  const appNav = `
-    <nav class="fx-app-nav" aria-label="App navigation">
-      ${appNavLink("home", "Home", routeForNav)}
-      ${appNavLink("planner", "Planner", routeForNav)}
-      ${appNavLink("bills", "Bills", routeForNav)}
-      ${appNavLink("accounts", "Accounts", routeForNav)}
-      ${appNavLink("settings", "Settings", routeForNav)}
-    </nav>
-  `;
+  const appNavBlock = renderHeaderNavigation(
+    "app",
+    routeForNav,
+    `<div class="fx-nav-drawer__extras">
+        <p class="fx-nav-drawer__user muted">${escapeHtml(profile?.display_name ?? state.session?.user.email ?? "Member")}</p>
+        <button type="button" class="danger js-signout" ${state.busy ? "disabled" : ""}>Sign out</button>
+      </div>`,
+  );
 
   const routeBody =
     state.route === "planner"
@@ -3566,11 +3609,11 @@ function renderApp() {
               <span class="fx-brand__tag">Forecast &amp; cash</span>
             </div>
           </div>
-          ${appNav}
+          ${appNavBlock}
           <div class="fx-header__actions">
             <span class="fx-pill"><strong>${escapeHtml(profile?.display_name ?? state.session?.user.email ?? "Member")}</strong></span>
             ${busy}
-            <button type="button" class="danger" id="btn-signout" ${state.busy ? "disabled" : ""}>Sign out</button>
+            <button type="button" class="danger js-signout" id="btn-signout" ${state.busy ? "disabled" : ""}>Sign out</button>
           </div>
         </header>
 
@@ -3735,6 +3778,7 @@ function renderCategorizeOverlay(snap: PlannerSnapshot | null): string {
 }
 
 function render() {
+  document.body.classList.remove("fx-mobile-nav-open");
   state.route = readRouteFromHash();
 
   if (!state.session && APP_ONLY_ROUTES.has(state.route)) {
@@ -3773,6 +3817,43 @@ function closeAuthModal() {
   render();
 }
 
+function setMobileNavOpen(open: boolean) {
+  const drawer = document.getElementById("fx-nav-drawer");
+  const toggle = document.getElementById("btn-mobile-nav");
+  if (!drawer || !toggle) return;
+  drawer.classList.toggle("is-open", open);
+  toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  if (window.matchMedia("(max-width: 979px)").matches) {
+    document.body.classList.toggle("fx-mobile-nav-open", open);
+  } else {
+    document.body.classList.remove("fx-mobile-nav-open");
+  }
+}
+
+function wireMobileNav() {
+  const drawer = document.getElementById("fx-nav-drawer");
+  const toggle = document.getElementById("btn-mobile-nav");
+  if (!drawer || !toggle) return;
+  const close = () => setMobileNavOpen(false);
+  const open = () => setMobileNavOpen(true);
+  toggle.addEventListener("click", () => {
+    drawer.classList.contains("is-open") ? close() : open();
+  });
+  document.getElementById("btn-mobile-nav-backdrop")?.addEventListener("click", close);
+  document.getElementById("btn-mobile-nav-close")?.addEventListener("click", close);
+  drawer.querySelectorAll<HTMLAnchorElement>(".fx-app-nav__link").forEach((a) => {
+    a.addEventListener("click", close);
+  });
+  document.getElementById("btn-open-auth-drawer")?.addEventListener("click", () => {
+    close();
+    openAuthModal();
+  });
+  const onResize = () => {
+    if (window.matchMedia("(min-width: 980px)").matches) close();
+  };
+  window.addEventListener("resize", onResize);
+}
+
 function wireAuth() {
   document.getElementById("btn-hero-cta")?.addEventListener("click", () => openAuthModal());
   document.getElementById("btn-open-auth")?.addEventListener("click", () => openAuthModal());
@@ -3801,6 +3882,8 @@ function wireAuth() {
 
   document.getElementById("auth-modal-backdrop")?.addEventListener("click", () => closeAuthModal());
   document.getElementById("auth-modal-close")?.addEventListener("click", () => closeAuthModal());
+
+  wireMobileNav();
 
   const form = document.querySelector<HTMLFormElement>("#form-signin");
   const signup = document.querySelector<HTMLButtonElement>("#btn-signup");
@@ -3999,7 +4082,7 @@ function wireApp() {
   const modeInput = document.querySelector<HTMLInputElement>("#field-mode");
   const plannerSnapshotInput = document.querySelector<HTMLTextAreaElement>("#field-planner-snapshot");
 
-  document.querySelector<HTMLButtonElement>("#btn-signout")?.addEventListener("click", async () => {
+  const signOutHandler = async () => {
     state.busy = true;
     render();
     await supabase.auth.signOut();
@@ -4019,7 +4102,12 @@ function wireApp() {
     state.authModalOpen = false;
     applyFullTheme(null);
     render();
+  };
+  document.querySelectorAll<HTMLButtonElement>(".js-signout").forEach((btn) => {
+    btn.addEventListener("click", signOutHandler);
   });
+
+  wireMobileNav();
 
   document.querySelector<HTMLFormElement>("#form-profile")?.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -4866,7 +4954,14 @@ async function init() {
   });
 
   document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || state.session || !state.authModalOpen) return;
+    if (e.key !== "Escape") return;
+    const drawer = document.getElementById("fx-nav-drawer");
+    if (drawer?.classList.contains("is-open")) {
+      e.preventDefault();
+      setMobileNavOpen(false);
+      return;
+    }
+    if (state.session || !state.authModalOpen) return;
     e.preventDefault();
     closeAuthModal();
   });
