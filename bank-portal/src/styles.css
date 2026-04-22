@@ -843,6 +843,11 @@ html::-webkit-scrollbar-thumb {
     justify-content: center;
   }
 
+  /* Wide screens: centered pill nav only — burger is for viewports below this breakpoint. */
+  .fx-nav-toggle {
+    display: none !important;
+  }
+
   /* Closed: pills in the header row */
   .fx-nav-drawer {
     position: static;
