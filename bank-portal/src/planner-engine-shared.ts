@@ -285,10 +285,16 @@ export interface PlannerSnapshot {
 }
 
 export const PLANNER_SCHEMA_VERSION = "billpayer-shared-v1";
-export const PLANNER_ENGINE_VERSION = "ts-engine-0.2.0";
+export const PLANNER_ENGINE_VERSION = "ts-engine-0.2.1";
 
 const DEFAULT_HORIZON_DAYS = 120;
 const DUE_SOON_WINDOW_DAYS = 14;
+/** Matches Android `reserveNearFutureWindowDays` default when building per-paycheck reserve lines. */
+const DEFAULT_RESERVE_NEAR_FUTURE_DAYS = 21;
+
+function minDate(a: Date, b: Date): Date {
+  return a.getTime() <= b.getTime() ? a : b;
+}
 
 function money(n: number): number {
   if (!Number.isFinite(n)) return 0;
@@ -817,19 +823,37 @@ function buildTimeline(
   snapshot: PlannerSnapshot,
   paychecks: ForecastPaycheck[],
   obligations: ForecastObligation[],
+  horizon: Date,
+  today: Date,
 ): PlannerTimelinePaycheckPlan[] {
   const timeline: PlannerTimelinePaycheckPlan[] = [];
   let cash = totalCashAvailable(snapshot);
+  const today0 = startOfDay(today);
+  const horizon0 = startOfDay(horizon);
+  const reserveWindowDays = snapshot.settings.reserveNearFutureWindowDays ?? DEFAULT_RESERVE_NEAR_FUTURE_DAYS;
+
   for (let i = 0; i < paychecks.length; i++) {
     const p = paychecks[i];
     const next = paychecks[i + 1];
-    const intervalEnd = next ? next.date : addDays(p.date, 30);
-    const essentialsNeeded = essentialsBetween(snapshot, p.date, intervalEnd);
-    const dueInWindow = obligations.filter((o) =>
-      o.dueDate.getTime() >= p.date.getTime() && o.dueDate.getTime() < intervalEnd.getTime()
-    );
+    const payDate0 = startOfDay(p.date);
+    /** Bills/essentials for this row: from "today" on the first deposit, then from each payday to the next. */
+    const intervalStart0 = startOfDay(i === 0 ? today0 : payDate0);
+    const intervalEnd0 = next ? startOfDay(next.date) : horizon0;
+    const isLastSegment = !next;
+
+    const essentialsNeeded = essentialsBetween(snapshot, intervalStart0, intervalEnd0);
+
+    const dueInWindow = obligations.filter((o) => {
+      if (!o.isHardDue) return false;
+      const t = startOfDay(o.dueDate).getTime();
+      const lo = intervalStart0.getTime();
+      const hi = intervalEnd0.getTime();
+      if (i === 0 && t < lo) return true;
+      if (i > 0 && t < lo) return false;
+      if (isLastSegment) return t <= hi;
+      return t < hi;
+    });
     const payNowList: PlannerAllocationLine[] = dueInWindow
-      .filter((o) => o.isHardDue)
       .map((o) => ({
         sourceId: o.sourceId,
         label: o.label,
@@ -841,9 +865,17 @@ function buildTimeline(
         amount: o.amount,
         rationale: `Due ${toIsoDate(o.dueDate)} - covered from ${p.payerLabel}`,
       }));
-    const reserveNowList: PlannerReserveAllocationLine[] = obligations
-      .filter((o) => o.dueDate.getTime() >= intervalEnd.getTime())
-      .slice(0, 5)
+    /** Same idea as Android: only obligations due strictly after the *next* deposit, within the reserve lookahead (not the entire horizon). */
+    const reserveStart0 = intervalEnd0;
+    let reserveEnd0 = startOfDay(addDays(reserveStart0, reserveWindowDays));
+    reserveEnd0 = minDate(reserveEnd0, horizon0);
+    const reserveNowList: PlannerReserveAllocationLine[] = (next
+      ? obligations.filter((o) => {
+        const t = startOfDay(o.dueDate).getTime();
+        return t > reserveStart0.getTime() && t <= reserveEnd0.getTime();
+      })
+      : [])
+      .sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime())
       .map((o) => ({
         obligationId: o.id,
         sourceId: o.sourceId,
@@ -859,7 +891,9 @@ function buildTimeline(
         label: "Essentials",
         bucket: "ESSENTIALS",
         amount: essentialsNeeded,
-        rationale: "Daily living costs until next paycheck.",
+        rationale: next
+          ? `Essential spending from ${toIsoDate(intervalStart0)} through ${toIsoDate(intervalEnd0)} (this pay cycle).`
+          : `Essential spending from ${toIsoDate(intervalStart0)} through end of plan horizon.`,
       });
     }
     allocations.push(...payNowList);
@@ -925,7 +959,7 @@ export function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
     : essentialsBetween(snapshot, today, horizon);
   const hardDueBeforeNextIncome = sumHardDueOnOrBefore(obligations, nextIncomeBoundary);
 
-  const timeline = buildTimeline(snapshot, paychecks, obligations);
+  const timeline = buildTimeline(snapshot, paychecks, obligations, horizon, today);
   const crossPaycheckReserveTotal = money(
     (timeline[0]?.reserveNowList ?? []).reduce((s, r) => s + r.amount, 0),
   );

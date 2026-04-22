@@ -1016,6 +1016,8 @@ export async function saveTransactionCategorization(userId: string, input: {
   expenseId?: string | null;
   goalId?: string | null;
   housingBucketId?: string | null;
+  /** When category_kind is INCOME, links the bank deposit to this paycheck source. */
+  incomeSourceId?: string | null;
   note?: string;
   isUserOverride?: boolean;
 }) {
@@ -1029,6 +1031,7 @@ export async function saveTransactionCategorization(userId: string, input: {
     expense_id: input.expenseId ?? null,
     goal_id: input.goalId ?? null,
     housing_bucket_id: input.housingBucketId ?? null,
+    income_source_id: input.incomeSourceId ?? null,
     note: input.note ?? "",
     is_user_override: input.isUserOverride ?? true,
   }, { onConflict: "user_id,transaction_id" });
@@ -1044,6 +1047,7 @@ export interface TransactionSplitRow {
   expenseId: string | null;
   goalId: string | null;
   housingBucketId: string | null;
+  incomeSourceId: string | null;
   note: string;
   position: number;
 }
@@ -1055,6 +1059,7 @@ export interface TransactionCategorizationRow {
   expenseId: string | null;
   goalId: string | null;
   housingBucketId: string | null;
+  incomeSourceId: string | null;
   note: string;
   isUserOverride: boolean;
 }
@@ -1087,6 +1092,7 @@ export async function loadTransactionAssignments(userId: string, transactionId: 
       expenseId: ((catRes.data as Record<string, unknown>).expense_id as string | null) ?? null,
       goalId: ((catRes.data as Record<string, unknown>).goal_id as string | null) ?? null,
       housingBucketId: ((catRes.data as Record<string, unknown>).housing_bucket_id as string | null) ?? null,
+      incomeSourceId: ((catRes.data as Record<string, unknown>).income_source_id as string | null) ?? null,
       note: String((catRes.data as Record<string, unknown>).note ?? ""),
       isUserOverride: ((catRes.data as Record<string, unknown>).is_user_override as boolean) ?? false,
     }
@@ -1103,6 +1109,7 @@ export async function loadTransactionAssignments(userId: string, transactionId: 
       expenseId: (r.expense_id as string | null) ?? null,
       goalId: (r.goal_id as string | null) ?? null,
       housingBucketId: (r.housing_bucket_id as string | null) ?? null,
+      incomeSourceId: (r.income_source_id as string | null) ?? null,
       note: String(r.note ?? ""),
       position: Number(r.position ?? 0),
     };
@@ -1437,6 +1444,7 @@ export async function deleteTransactionLinkedActuals(userId: string, txId: strin
   await supabase.from("debt_transactions").delete().eq("user_id", userId).ilike("id", `${prefix}%`);
   await supabase.from("expense_spends").delete().eq("user_id", userId).ilike("id", `${prefix}%`);
   await supabase.from("housing_payments").delete().eq("user_id", userId).ilike("id", `${prefix}%`);
+  await supabase.from("paychecks").delete().eq("user_id", userId).ilike("id", `${prefix}%`);
 }
 
 /**
@@ -1500,6 +1508,27 @@ export async function linkTransactionToPlannerActual(
       }));
       return !error;
     }
+    if (target.kind === "INCOME") {
+      const { data: inc, error: selErr } = await supabase
+        .from("income_sources")
+        .select("name, payer_label")
+        .eq("user_id", userId)
+        .eq("id", target.id)
+        .maybeSingle();
+      if (selErr) return false;
+      const r = inc as Record<string, unknown> | null;
+      const payerLabel = String(r?.payer_label ?? r?.name ?? "Paycheck").trim() || "Paycheck";
+      const { error } = await supabase.from("paychecks").upsert(withUser(userId, {
+        id: plannerActualId(txId, "INCOME"),
+        income_source_id: target.id,
+        payer_label: payerLabel,
+        date,
+        amount,
+        deposited: true,
+        account_id: null,
+      }));
+      return !error;
+    }
     return false;
   } catch {
     return false;
@@ -1516,6 +1545,7 @@ export type CategoryRuleTargetKind =
   | "EXPENSE"
   | "GOAL"
   | "HOUSING"
+  | "INCOME"
   | "CATEGORY"
   | "CASH_IN"
   | "CASH_OUT"
@@ -1534,6 +1564,7 @@ export interface CategoryRule {
   target_expense_id?: string | null;
   target_housing_bucket_id?: string | null;
   target_goal_id?: string | null;
+  target_income_source_id?: string | null;
   target_custom_label?: string | null;
   is_enabled: boolean;
   priority: number;
@@ -1572,6 +1603,7 @@ export async function upsertCategoryRuleFromAdjustment(userId: string, input: {
   targetExpenseId?: string | null;
   targetGoalId?: string | null;
   targetHousingBucketId?: string | null;
+  targetIncomeSourceId?: string | null;
 }): Promise<void> {
   const normalized = normalizeMerchantKey(input.matcherValue);
   if (!normalized) return;
@@ -1597,6 +1629,7 @@ export async function upsertCategoryRuleFromAdjustment(userId: string, input: {
     target_expense_id: input.targetKind === "EXPENSE" ? (input.targetExpenseId ?? null) : null,
     target_goal_id: input.targetKind === "GOAL" ? (input.targetGoalId ?? null) : null,
     target_housing_bucket_id: input.targetKind === "HOUSING" ? (input.targetHousingBucketId ?? null) : null,
+    target_income_source_id: input.targetKind === "INCOME" ? (input.targetIncomeSourceId ?? null) : null,
     is_enabled: true,
     priority: 10,
     applied_count: priorCount + 1,
@@ -1649,6 +1682,7 @@ export async function saveTransactionSplits(userId: string, transactionId: strin
   expenseId?: string | null;
   goalId?: string | null;
   housingBucketId?: string | null;
+  incomeSourceId?: string | null;
   note?: string;
   position?: number;
 }>) {
@@ -1674,6 +1708,7 @@ export async function saveTransactionSplits(userId: string, transactionId: strin
     expense_id: s.expenseId ?? null,
     goal_id: s.goalId ?? null,
     housing_bucket_id: s.housingBucketId ?? null,
+    income_source_id: s.incomeSourceId ?? null,
     note: s.note ?? "",
   }));
   const { error } = await supabase.from("transaction_splits").insert(rows);
@@ -1751,6 +1786,29 @@ export async function linkTransactionSplitsToPlannerActuals(
           note,
         }));
         if (!error) posted++; else skipped++;
+      } else if (split.target.kind === "INCOME") {
+        const { data: inc, error: selErr } = await supabase
+          .from("income_sources")
+          .select("name, payer_label")
+          .eq("user_id", userId)
+          .eq("id", split.target.id)
+          .maybeSingle();
+        if (selErr) {
+          skipped++;
+        } else {
+          const r = inc as Record<string, unknown> | null;
+          const payerLabel = String(r?.payer_label ?? r?.name ?? "Paycheck").trim() || "Paycheck";
+          const { error } = await supabase.from("paychecks").upsert(withUser(userId, {
+            id: rowId,
+            income_source_id: split.target.id,
+            payer_label: payerLabel,
+            date,
+            amount,
+            deposited: true,
+            account_id: null,
+          }));
+          if (!error) posted++; else skipped++;
+        }
       } else {
         skipped++;
       }

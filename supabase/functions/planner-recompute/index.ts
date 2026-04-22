@@ -100,6 +100,7 @@ interface PlannerSettings {
   selectedScenarioMode?: PlannerScenarioMode;
   planningStyle?: string;
   horizonDays?: number;
+  reserveNearFutureWindowDays?: number;
 }
 interface PlannerSnapshot {
   today: string;
@@ -199,9 +200,14 @@ interface PlannerPlan {
 }
 
 const PLANNER_SCHEMA_VERSION = "billpayer-shared-v1";
-const PLANNER_ENGINE_VERSION = "ts-engine-0.2.0";
+const PLANNER_ENGINE_VERSION = "ts-engine-0.2.1";
 const DEFAULT_HORIZON_DAYS = 120;
 const DUE_SOON_WINDOW_DAYS = 14;
+const DEFAULT_RESERVE_NEAR_FUTURE_DAYS = 21;
+
+function minDate(a: Date, b: Date): Date {
+  return a.getTime() <= b.getTime() ? a : b;
+}
 
 // =============================================================
 // Date helpers
@@ -629,30 +635,67 @@ function dueRec(o: ForecastObligation, today: Date): PlannerDueItemRecommendatio
   };
 }
 
-function buildTimeline(snapshot: PlannerSnapshot, paychecks: ForecastPaycheck[], obligations: ForecastObligation[]): PlannerTimelinePaycheckPlan[] {
+function buildTimeline(
+  snapshot: PlannerSnapshot,
+  paychecks: ForecastPaycheck[],
+  obligations: ForecastObligation[],
+  horizon: Date,
+  today: Date,
+): PlannerTimelinePaycheckPlan[] {
   const timeline: PlannerTimelinePaycheckPlan[] = [];
   let cash = totalCashAvailable(snapshot);
+  const today0 = startOfDay(today);
+  const horizon0 = startOfDay(horizon);
+  const reserveWindowDays = snapshot.settings.reserveNearFutureWindowDays ?? DEFAULT_RESERVE_NEAR_FUTURE_DAYS;
+
   for (let i = 0; i < paychecks.length; i++) {
     const p = paychecks[i];
     const next = paychecks[i + 1];
-    const intervalEnd = next ? next.date : addDays(p.date, 30);
-    const essentialsNeeded = essentialsBetween(snapshot, p.date, intervalEnd);
-    const dueInWindow = obligations.filter((o) => o.dueDate.getTime() >= p.date.getTime() && o.dueDate.getTime() < intervalEnd.getTime());
-    const payNowList: PlannerAllocationLine[] = dueInWindow.filter((o) => o.isHardDue).map((o) => ({
+    const payDate0 = startOfDay(p.date);
+    const intervalStart0 = startOfDay(i === 0 ? today0 : payDate0);
+    const intervalEnd0 = next ? startOfDay(next.date) : horizon0;
+    const isLastSegment = !next;
+
+    const essentialsNeeded = essentialsBetween(snapshot, intervalStart0, intervalEnd0);
+
+    const dueInWindow = obligations.filter((o) => {
+      if (!o.isHardDue) return false;
+      const t = startOfDay(o.dueDate).getTime();
+      const lo = intervalStart0.getTime();
+      const hi = intervalEnd0.getTime();
+      if (i === 0 && t < lo) return true;
+      if (i > 0 && t < lo) return false;
+      if (isLastSegment) return t <= hi;
+      return t < hi;
+    });
+    const payNowList: PlannerAllocationLine[] = dueInWindow.map((o) => ({
       sourceId: o.sourceId, label: o.label,
       bucket: o.sourceType === "DEBT" ? "DEBT_MINIMUM" : o.sourceType === "RENT" ? "HOUSING_CURRENT" : "BILL",
       amount: o.amount, rationale: `Due ${toIsoDate(o.dueDate)} — covered from ${p.payerLabel}`,
     }));
-    const reserveNowList: PlannerReserveAllocationLine[] = obligations
-      .filter((o) => o.dueDate.getTime() >= intervalEnd.getTime())
-      .slice(0, 5)
-      .map((o) => ({
-        obligationId: o.id, sourceId: o.sourceId, label: o.label, amount: o.amount, dueDate: toIsoDate(o.dueDate), sourcePayDate: toIsoDate(p.date),
-        reserveKind: o.sourceType,
-      }));
+    const reserveStart0 = intervalEnd0;
+    let reserveEnd0 = startOfDay(addDays(reserveStart0, reserveWindowDays));
+    reserveEnd0 = minDate(reserveEnd0, horizon0);
+    const reserveNowList: PlannerReserveAllocationLine[] = (next
+      ? obligations
+        .filter((o) => {
+          const t = startOfDay(o.dueDate).getTime();
+          return t > reserveStart0.getTime() && t <= reserveEnd0.getTime();
+        })
+        .sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime())
+        .map((o) => ({
+          obligationId: o.id, sourceId: o.sourceId, label: o.label, amount: o.amount, dueDate: toIsoDate(o.dueDate), sourcePayDate: toIsoDate(p.date),
+          reserveKind: o.sourceType,
+        }))
+      : []);
     const allocations: PlannerAllocationLine[] = [];
     if (essentialsNeeded > 0) {
-      allocations.push({ label: "Essentials", bucket: "ESSENTIALS", amount: essentialsNeeded, rationale: "Daily living costs until next paycheck." });
+      allocations.push({
+        label: "Essentials", bucket: "ESSENTIALS", amount: essentialsNeeded,
+        rationale: next
+          ? `Essential spending from ${toIsoDate(intervalStart0)} through ${toIsoDate(intervalEnd0)} (this pay cycle).`
+          : `Essential spending from ${toIsoDate(intervalStart0)} through end of plan horizon.`,
+      });
     }
     allocations.push(...payNowList);
     const usable = p.usableAmount;
@@ -707,7 +750,7 @@ function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
     : essentialsBetween(snapshot, today, horizon);
   const hardDueBeforeNextIncome = sumHardDueOnOrBefore(obligations, nextIncomeBoundary);
 
-  const timeline = buildTimeline(snapshot, paychecks, obligations);
+  const timeline = buildTimeline(snapshot, paychecks, obligations, horizon, today);
   const crossPaycheckReserveTotal = money(
     (timeline[0]?.reserveNowList ?? []).reduce((s, r) => s + r.amount, 0),
   );
@@ -1153,9 +1196,14 @@ async function loadPlannerSnapshot(client: SupabaseClient, userId: string): Prom
     }),
     settings: {
       targetBuffer: numOr(rawSettings.targetBuffer, 0),
+      safetyFloorCash: numOr(rawSettings.safetyFloorCash ?? rawSettings.safety_floor_cash, 0),
       selectedScenarioMode: (rawSettings.selectedScenarioMode as PlannerScenarioMode) ?? "FIXED",
       planningStyle: (rawSettings.planningStyle as string) ?? "BALANCED",
       horizonDays: numOr(rawSettings.horizonDays, 120),
+      reserveNearFutureWindowDays: numOr(
+        rawSettings.reserveNearFutureWindowDays ?? rawSettings.reserve_near_future_window_days,
+        DEFAULT_RESERVE_NEAR_FUTURE_DAYS,
+      ),
     },
   };
 }

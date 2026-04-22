@@ -348,6 +348,12 @@ function targetFromRule(rule: CategoryRule, snapshot: PlannerSnapshot): Categori
       if (!bucket) return null;
       return { kind: "HOUSING", bucketId: bucket.id, bucketLabel: bucket.label };
     }
+    case "INCOME": {
+      const sid = rule.target_income_source_id;
+      const source = sid ? snapshot.incomeSources.find((s) => s.id === sid) : undefined;
+      if (!source) return null;
+      return { kind: "INCOME", incomeSourceId: source.id, incomeSourceName: source.name || source.payerLabel || "Income" };
+    }
     case "CASH_IN":
       return { kind: "CASH_IN" };
     case "CASH_OUT":
@@ -474,6 +480,7 @@ export async function persistAutoCategorizedTransactions(
         expenseId: suggestion.target.kind === "EXPENSE" ? suggestion.target.expenseId : null,
         goalId: suggestion.target.kind === "GOAL" ? suggestion.target.goalId : null,
         housingBucketId: suggestion.target.kind === "HOUSING" ? suggestion.target.bucketId : null,
+        incomeSourceId: suggestion.target.kind === "INCOME" ? suggestion.target.incomeSourceId : null,
         note: suggestion.reason,
         isUserOverride: false,
       });
@@ -505,6 +512,8 @@ async function persistAsPlannerActual(
       return linkTransactionToPlannerActual(userId, tx.id, { kind: "EXPENSE", id: suggestion.target.expenseId }, tx, "Auto");
     case "HOUSING":
       return linkTransactionToPlannerActual(userId, tx.id, { kind: "HOUSING", id: suggestion.target.bucketId }, tx, "Auto");
+    case "INCOME":
+      return linkTransactionToPlannerActual(userId, tx.id, { kind: "INCOME", id: suggestion.target.incomeSourceId }, tx, "Auto");
     default:
       return false;
   }

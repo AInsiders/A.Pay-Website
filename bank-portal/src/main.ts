@@ -961,7 +961,7 @@ async function refreshTxAssignmentCache(): Promise<void> {
     const [catRes, splitRes] = await Promise.all([
       supabase
         .from("transaction_categorizations")
-        .select("transaction_id, category_kind, bill_id, debt_id, expense_id, goal_id, housing_bucket_id, is_user_override")
+        .select("transaction_id, category_kind, bill_id, debt_id, expense_id, goal_id, housing_bucket_id, income_source_id, is_user_override")
         .eq("user_id", userId)
         .in("transaction_id", txIds),
       supabase
@@ -987,6 +987,10 @@ async function refreshTxAssignmentCache(): Promise<void> {
       if (kind === "EXPENSE") return snap.expenses.find((e) => e.id === id)?.name ?? "Expense";
       if (kind === "GOAL") return snap.goals.find((g) => g.id === id)?.name ?? "Goal";
       if (kind === "HOUSING") return snap.housingBuckets.find((h) => h.id === id)?.label ?? "Housing";
+      if (kind === "INCOME") {
+        const s = snap.incomeSources.find((x) => x.id === id);
+        return s?.name?.trim() || s?.payerLabel?.trim() || "Income";
+      }
       return labelForKind(kind);
     };
 
@@ -1004,6 +1008,7 @@ async function refreshTxAssignmentCache(): Promise<void> {
         : rawKind === "EXPENSE" ? (r.expense_id as string | null)
         : rawKind === "GOAL" ? (r.goal_id as string | null)
         : rawKind === "HOUSING" ? (r.housing_bucket_id as string | null)
+        : rawKind === "INCOME" ? (r.income_source_id as string | null)
         : null;
       out[txId] = {
         kind: effectiveKind,
@@ -2421,14 +2426,16 @@ function renderPaycheckCard(
     })
     .join("");
   const reserves = p.reserveNowList ?? [];
+  const reserveWindowDays = state.normalizedSnapshot?.settings?.reserveNearFutureWindowDays ?? 21;
   const reservesHtml = reserves.length > 0 ? `
     <div class="fx-pay-bucket fx-pay-bucket--reserve">
       <div class="fx-pay-bucket__head">
-        <span class="fx-pay-bucket__label">Reserved for later</span>
+        <span class="fx-pay-bucket__label">Set aside from this deposit</span>
         <strong class="fx-pay-bucket__total">${money(reserves.reduce((s, r) => s + r.amount, 0))}</strong>
       </div>
+      <p class="muted" style="margin:0 0 8px;font-size:0.78rem;line-height:1.35">Only items due <strong>after</strong> your next deposit and within the next <strong>${reserveWindowDays}</strong> days (same window as the app). Nothing from other pay cycles is listed here.</p>
       <ul class="fx-pay-bucket__lines">
-        ${reserves.slice(0, 4).map((r) => `<li><span>${escapeHtml(r.label)}</span><span>${money(r.amount)}</span></li>`).join("")}
+        ${reserves.map((r) => `<li><span>${escapeHtml(r.label)} <span class="muted">(${escapeHtml(r.dueDate ?? "")})</span></span><span>${money(r.amount)}</span></li>`).join("")}
       </ul>
     </div>
   ` : "";
@@ -3592,12 +3599,25 @@ function categoryTargetOptions(snap: PlannerSnapshot | null, isCredit: boolean, 
   const optgroup = (label: string, items: string[]) =>
     items.length ? `<optgroup label="${escapeAttr(label)}">${items.join("")}</optgroup>` : "";
 
+  const cash = isCredit ? [opt("CASH_IN:", "Cash in (untracked)")] : [opt("CASH_OUT:", "Cash out (untracked)")];
+
+  if (isCredit) {
+    const income = (snap?.incomeSources ?? []).filter((s) => s.isActive !== false).map((s) => {
+      const label = s.name?.trim() || s.payerLabel?.trim() || "Income source";
+      return opt(`INCOME:${s.id}`, label);
+    });
+    return [
+      opt("UNCATEGORIZED:", "— pick a category —"),
+      optgroup("Income (match to a paycheck source)", income),
+      optgroup("Other", cash),
+    ].join("");
+  }
+
   const bills = (snap?.bills ?? []).map((b) => opt(`BILL:${b.id}`, b.name));
   const debts = (snap?.debts ?? []).map((d) => opt(`DEBT:${d.id}`, d.name));
   const expenses = (snap?.expenses ?? []).map((e) => opt(`EXPENSE:${e.id}`, e.name));
   const housing = (snap?.housingBuckets ?? []).map((h) => opt(`HOUSING:${h.id}`, h.label));
   const goals = (snap?.goals ?? []).map((g) => opt(`GOAL:${g.id}`, g.name));
-  const cash = isCredit ? [opt("CASH_IN:", "Cash in (untracked)")] : [opt("CASH_OUT:", "Cash out (untracked)")];
 
   return [
     opt("UNCATEGORIZED:", "— pick a category —"),
@@ -4204,6 +4224,7 @@ function wireApp() {
 function splitTargetFromAssignment(row: {
   categoryKind: string; billId: string | null; debtId: string | null;
   expenseId: string | null; goalId: string | null; housingBucketId: string | null;
+  incomeSourceId: string | null;
 }): string {
   const kind = row.categoryKind.toUpperCase();
   switch (kind) {
@@ -4212,6 +4233,7 @@ function splitTargetFromAssignment(row: {
     case "EXPENSE": return `EXPENSE:${row.expenseId ?? ""}`;
     case "GOAL": return `GOAL:${row.goalId ?? ""}`;
     case "HOUSING": return `HOUSING:${row.housingBucketId ?? ""}`;
+    case "INCOME": return `INCOME:${row.incomeSourceId ?? ""}`;
     case "CASH_IN": return "CASH_IN:";
     case "CASH_OUT": return "CASH_OUT:";
     default: return "UNCATEGORIZED:";
@@ -4307,6 +4329,7 @@ async function openCategorizeEditor(btn: HTMLButtonElement): Promise<void> {
           expenseId: s.expenseId,
           goalId: s.goalId,
           housingBucketId: s.housingBucketId,
+          incomeSourceId: s.incomeSourceId,
         }),
         amount: Math.abs(s.amount),
         note: s.note,
@@ -4322,6 +4345,7 @@ async function openCategorizeEditor(btn: HTMLButtonElement): Promise<void> {
           expenseId: assignments.categorization.expenseId,
           goalId: assignments.categorization.goalId,
           housingBucketId: assignments.categorization.housingBucketId,
+          incomeSourceId: assignments.categorization.incomeSourceId,
         }),
         amount: transactionAmount,
         note: "",
@@ -4461,6 +4485,7 @@ function wireCategorizeButtons() {
         expenseId: !isSplit && primaryTarget.kind === "EXPENSE" ? primaryTarget.id : null,
         goalId: !isSplit && primaryTarget.kind === "GOAL" ? primaryTarget.id : null,
         housingBucketId: !isSplit && primaryTarget.kind === "HOUSING" ? primaryTarget.id : null,
+        incomeSourceId: !isSplit && primaryTarget.kind === "INCOME" ? primaryTarget.id : null,
         note: c.note,
         isUserOverride: true,
       });
@@ -4480,6 +4505,7 @@ function wireCategorizeButtons() {
             expenseId: t.kind === "EXPENSE" ? t.id : null,
             goalId: t.kind === "GOAL" ? t.id : null,
             housingBucketId: t.kind === "HOUSING" ? t.id : null,
+            incomeSourceId: t.kind === "INCOME" ? t.id : null,
             note: s.note,
           };
         }));
@@ -4508,7 +4534,7 @@ function wireCategorizeButtons() {
       if (learnAlways && !isSplit && primaryTarget.kind !== "UNCATEGORIZED" && primaryTarget.kind !== "CASH_IN" && primaryTarget.kind !== "CASH_OUT") {
         const matcherValue = (c.merchant || c.description || "").trim();
         if (matcherValue) {
-          const ruleTargetKind = primaryTarget.kind as "BILL" | "DEBT" | "EXPENSE" | "GOAL" | "HOUSING";
+          const ruleTargetKind = primaryTarget.kind as "BILL" | "DEBT" | "EXPENSE" | "GOAL" | "HOUSING" | "INCOME";
           const id = "id" in primaryTarget ? primaryTarget.id : "";
           await upsertCategoryRuleFromAdjustment(userId, {
             matcherValue,
@@ -4519,6 +4545,7 @@ function wireCategorizeButtons() {
             targetExpenseId: ruleTargetKind === "EXPENSE" ? id : null,
             targetGoalId: ruleTargetKind === "GOAL" ? id : null,
             targetHousingBucketId: ruleTargetKind === "HOUSING" ? id : null,
+            targetIncomeSourceId: ruleTargetKind === "INCOME" ? id : null,
           });
         }
       }
