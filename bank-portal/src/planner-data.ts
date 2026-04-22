@@ -9,14 +9,17 @@ import {
   buildPlannerPlan,
   PLANNER_ENGINE_VERSION,
   PLANNER_SCHEMA_VERSION,
+  type NotificationSettingsSnapshot,
   type PlannerSnapshot,
   type RecurringRule,
   type SnapshotAccount,
   type SnapshotBill,
   type SnapshotBillPayment,
   type SnapshotCashAdjustment,
+  type SnapshotCustomLabel,
   type SnapshotDebt,
   type SnapshotDebtTransaction,
+  type SnapshotDeductionRule,
   type SnapshotExpenseSpend,
   type SnapshotGoal,
   type SnapshotHousingBucket,
@@ -25,6 +28,7 @@ import {
   type SnapshotIncomeSource,
   type SnapshotPaycheck,
   type SnapshotRecurringExpense,
+  type SnapshotUserCategory,
 } from "./planner-engine-shared";
 
 export type { PlannerSnapshot } from "./planner-engine-shared";
@@ -69,6 +73,9 @@ export async function loadPlannerSnapshot(userId: string): Promise<PlannerSnapsh
     goals,
     cashAdjustments,
     settings,
+    deductionRules,
+    userCategories,
+    customLabels,
   ] = await Promise.all([
     filter("bank_accounts"),
     filter("income_sources"),
@@ -85,10 +92,14 @@ export async function loadPlannerSnapshot(userId: string): Promise<PlannerSnapsh
     filter("goals"),
     filter("cash_adjustments"),
     filter("planner_settings"),
+    filter("deduction_rules"),
+    filter("user_categories"),
+    filter("custom_labels"),
   ]);
 
   const settingsRow = (settings.data?.[0] ?? null) as Record<string, unknown> | null;
   const rawSettings = (settingsRow?.settings ?? {}) as Record<string, unknown>;
+  const rawNotification = (settingsRow?.notification_settings ?? {}) as Record<string, unknown>;
   const hcRow = (housingConfig.data?.[0] ?? null) as Record<string, unknown> | null;
 
   return {
@@ -259,7 +270,66 @@ export async function loadPlannerSnapshot(userId: string): Promise<PlannerSnapsh
       selectedScenarioMode: (rawSettings.selectedScenarioMode as PlannerScenarioMode) ?? "FIXED",
       planningStyle: (rawSettings.planningStyle as string) ?? "BALANCED",
       horizonDays: numOr(rawSettings.horizonDays, 120),
+      safetyFloorCash: rawSettings.safetyFloorCash !== undefined ? numOr(rawSettings.safetyFloorCash, 0) : undefined,
+      reserveNearFutureWindowDays: rawSettings.reserveNearFutureWindowDays !== undefined
+        ? Math.trunc(numOr(rawSettings.reserveNearFutureWindowDays, 21))
+        : undefined,
+      currency: rawSettings.currency !== undefined ? String(rawSettings.currency) : undefined,
+      timezone: rawSettings.timezone !== undefined ? String(rawSettings.timezone) : undefined,
+      allowNegativeCash: typeof rawSettings.allowNegativeCash === "boolean" ? rawSettings.allowNegativeCash : undefined,
+      sameDayIncomeBeforeSameDayBills: typeof rawSettings.sameDayIncomeBeforeSameDayBills === "boolean"
+        ? rawSettings.sameDayIncomeBeforeSameDayBills
+        : undefined,
+      roundingMode: rawSettings.roundingMode !== undefined ? String(rawSettings.roundingMode) : undefined,
+      optimizationGoal: rawSettings.optimizationGoal !== undefined ? String(rawSettings.optimizationGoal) : undefined,
+      payoffMode: rawSettings.payoffMode !== undefined ? String(rawSettings.payoffMode) : undefined,
+      housingPaymentMode: rawSettings.housingPaymentMode !== undefined ? String(rawSettings.housingPaymentMode) : undefined,
+      housingPayoffTargetMode: rawSettings.housingPayoffTargetMode !== undefined
+        ? String(rawSettings.housingPayoffTargetMode)
+        : undefined,
+      priorityOrder: rawSettings.priorityOrder !== undefined ? String(rawSettings.priorityOrder) : undefined,
     },
+    deductionRules: (deductionRules.data ?? []).map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? ""),
+        name: String(r.name ?? ""),
+        scope: (r.scope as SnapshotDeductionRule["scope"]) ?? "GLOBAL",
+        incomeSourceId: r.income_source_id ? String(r.income_source_id) : null,
+        valueType: (r.value_type as SnapshotDeductionRule["valueType"]) ?? "PERCENTAGE",
+        fixedAmount: numOr(r.fixed_amount, 0),
+        percentage: numOr(r.percentage, 0),
+        status: String(r.status ?? "MANDATORY"),
+        isEnabledByDefault: r.is_enabled_by_default !== false,
+        notes: String(r.notes ?? ""),
+      } satisfies SnapshotDeductionRule;
+    }),
+    categories: (userCategories.data ?? []).map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? ""),
+        name: String(r.name ?? ""),
+        kind: String(r.kind ?? "GENERAL"),
+        notes: String(r.notes ?? ""),
+      } satisfies SnapshotUserCategory;
+    }),
+    labels: (customLabels.data ?? []).map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? ""),
+        label: String(r.label ?? ""),
+        notes: String(r.notes ?? ""),
+      } satisfies SnapshotCustomLabel;
+    }),
+    notificationSettings: {
+      id: String(rawNotification.id ?? "notification_settings"),
+      paydayNotificationsEnabled: rawNotification.paydayNotificationsEnabled === true,
+      recalculateRemindersEnabled: rawNotification.recalculateRemindersEnabled === true,
+      paydayLeadMinutes: Math.trunc(numOr(rawNotification.paydayLeadMinutes, 60)),
+      recalculateReminderHour: Math.trunc(numOr(rawNotification.recalculateReminderHour, 18)),
+      recalculateReminderMinute: Math.trunc(numOr(rawNotification.recalculateReminderMinute, 0)),
+    } satisfies NotificationSettingsSnapshot,
+    exportMetadata: {},
   };
 }
 
@@ -479,14 +549,437 @@ export interface PlannerSettingsForm {
   targetBuffer?: number;
   selectedScenarioMode?: PlannerScenarioMode;
   horizonDays?: number;
+  planningStyle?: string;
+  safetyFloorCash?: number;
+  reserveNearFutureWindowDays?: number;
+  currency?: string;
+  timezone?: string;
+  allowNegativeCash?: boolean;
+  sameDayIncomeBeforeSameDayBills?: boolean;
+  roundingMode?: string;
+  optimizationGoal?: string;
+  payoffMode?: string;
+  housingPaymentMode?: string;
+  housingPayoffTargetMode?: string;
+  priorityOrder?: string;
 }
 
-export async function savePlannerSettings(userId: string, settings: PlannerSettingsForm) {
+export async function savePlannerSettings(userId: string, patch: PlannerSettingsForm) {
+  const { data: row, error: selErr } = await supabase.from("planner_settings").select("settings, notification_settings").eq("user_id", userId).maybeSingle();
+  if (selErr) throw new Error(selErr.message);
+  const prev = (row?.settings ?? {}) as Record<string, unknown>;
+  const next = { ...prev, ...patch };
   const { error } = await supabase.from("planner_settings").upsert({
     user_id: userId,
-    settings,
+    settings: next,
+    notification_settings: row?.notification_settings ?? {},
   });
   if (error) throw new Error(error.message);
+}
+
+export async function saveNotificationSettings(userId: string, patch: NotificationSettingsSnapshot) {
+  const { data: row, error: selErr } = await supabase.from("planner_settings").select("settings, notification_settings").eq("user_id", userId).maybeSingle();
+  if (selErr) throw new Error(selErr.message);
+  const prev = (row?.notification_settings ?? {}) as Record<string, unknown>;
+  const next = { ...prev, ...patch };
+  const { error } = await supabase.from("planner_settings").upsert({
+    user_id: userId,
+    settings: row?.settings ?? {},
+    notification_settings: next,
+  });
+  if (error) throw new Error(error.message);
+}
+
+export interface DeductionRuleFormInput {
+  id?: string;
+  name: string;
+  scope?: "GLOBAL" | "INCOME_SOURCE";
+  incomeSourceId?: string | null;
+  valueType?: "PERCENTAGE" | "FIXED_AMOUNT";
+  fixedAmount?: number;
+  percentage?: number;
+  status?: string;
+  isEnabledByDefault?: boolean;
+  notes?: string;
+}
+
+export async function saveDeductionRule(userId: string, input: DeductionRuleFormInput) {
+  const id = input.id ?? newId();
+  const { error } = await supabase.from("deduction_rules").upsert(withUser(userId, {
+    id,
+    name: input.name,
+    scope: input.scope ?? "GLOBAL",
+    income_source_id: input.incomeSourceId ?? null,
+    value_type: input.valueType ?? "PERCENTAGE",
+    fixed_amount: input.fixedAmount ?? 0,
+    percentage: input.percentage ?? 0,
+    status: input.status ?? "MANDATORY",
+    is_enabled_by_default: input.isEnabledByDefault ?? true,
+    notes: input.notes ?? "",
+    tags: [],
+    custom_fields: [],
+  }));
+  if (error) throw new Error(error.message);
+  return id;
+}
+
+export async function deleteDeductionRule(userId: string, id: string) {
+  const { error } = await supabase.from("deduction_rules").delete().eq("user_id", userId).eq("id", id);
+  if (error) throw new Error(error.message);
+}
+
+export interface UserCategoryFormInput {
+  id?: string;
+  name: string;
+  kind?: string;
+  notes?: string;
+}
+
+export async function saveUserCategory(userId: string, input: UserCategoryFormInput) {
+  const id = input.id ?? newId();
+  const { error } = await supabase.from("user_categories").upsert(withUser(userId, {
+    id,
+    name: input.name,
+    kind: input.kind ?? "GENERAL",
+    notes: input.notes ?? "",
+    tags: [],
+  }));
+  if (error) throw new Error(error.message);
+  return id;
+}
+
+export async function deleteUserCategory(userId: string, id: string) {
+  const { error } = await supabase.from("user_categories").delete().eq("user_id", userId).eq("id", id);
+  if (error) throw new Error(error.message);
+}
+
+export interface CustomLabelFormInput {
+  id?: string;
+  label: string;
+  notes?: string;
+}
+
+export async function saveCustomLabel(userId: string, input: CustomLabelFormInput) {
+  const id = input.id ?? newId();
+  const { error } = await supabase.from("custom_labels").upsert(withUser(userId, {
+    id,
+    label: input.label,
+    notes: input.notes ?? "",
+  }));
+  if (error) throw new Error(error.message);
+  return id;
+}
+
+export async function deleteCustomLabel(userId: string, id: string) {
+  const { error } = await supabase.from("custom_labels").delete().eq("user_id", userId).eq("id", id);
+  if (error) throw new Error(error.message);
+}
+
+/** Android `BACKUP_SCHEMA_VERSION` — keep aligned for cross-platform JSON backups. */
+export const WEB_BACKUP_SCHEMA_VERSION = 1;
+
+export interface PlannerBackupPackage {
+  schemaVersion: number;
+  appVersion: string;
+  exportedAt: string;
+  snapshot: PlannerSnapshot;
+}
+
+export async function buildPlannerBackupPackage(userId: string, appVersion: string): Promise<PlannerBackupPackage> {
+  const snapshot = await loadPlannerSnapshot(userId);
+  return {
+    schemaVersion: WEB_BACKUP_SCHEMA_VERSION,
+    appVersion,
+    exportedAt: new Date().toISOString(),
+    snapshot,
+  };
+}
+
+/** Deletes all normalized planner rows for the user (destructive). Order respects FKs. */
+export async function deleteAllNormalizedPlannerData(userId: string): Promise<void> {
+  const del = async (table: string) => {
+    const { error } = await supabase.from(table).delete().eq("user_id", userId);
+    if (error) throw new Error(`${table}: ${error.message}`);
+  };
+  await del("transaction_splits");
+  await del("transaction_categorizations");
+  await del("paycheck_actions");
+  await del("bill_payments");
+  await del("expense_spends");
+  await del("debt_transactions");
+  await del("revolving_debt_settings");
+  await del("housing_payments");
+  await del("bills");
+  await del("debts");
+  await del("recurring_expenses");
+  await del("paychecks");
+  await del("housing_buckets");
+  await del("goals");
+  await del("deduction_rules");
+  await del("user_categories");
+  await del("custom_labels");
+  await del("cash_adjustments");
+  await del("bank_transactions");
+  await del("bank_accounts");
+  await del("category_rules");
+  await del("income_sources");
+  await del("housing_config");
+  const { error: snapErr } = await supabase.from("planner_snapshots").delete().eq("user_id", userId);
+  if (snapErr) throw new Error(`planner_snapshots: ${snapErr.message}`);
+  const { error: setErr } = await supabase.from("planner_settings").delete().eq("user_id", userId);
+  if (setErr) throw new Error(`planner_settings: ${setErr.message}`);
+}
+
+/**
+ * Replace all normalized data from a backup `snapshot` (after optional reset).
+ * Expects camelCase snapshot keys as produced by `loadPlannerSnapshot` / Android export.
+ */
+export async function upsertNormalizedFromPlannerSnapshot(userId: string, snap: PlannerSnapshot): Promise<void> {
+  const s = snap;
+  if (s.accounts?.length) {
+    const { error } = await supabase.from("bank_accounts").upsert(
+      s.accounts.map((a) => withUser(userId, {
+        id: a.id,
+        name: a.name,
+        type: a.type,
+        current_balance: a.currentBalance,
+        available_balance: a.availableBalance,
+        include_in_planning: a.includeInPlanning !== false,
+        protected_from_payoff: a.protectedFromPayoff === true,
+        teller_enrollment_id: a.tellerEnrollmentId ?? null,
+        teller_linked_account_id: a.tellerLinkedAccountId ?? null,
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.incomeSources?.length) {
+    const { error } = await supabase.from("income_sources").upsert(
+      s.incomeSources.map((inc) => withUser(userId, {
+        id: inc.id,
+        name: inc.name,
+        payer_label: inc.payerLabel ?? "",
+        recurring_rule: inc.recurringRule,
+        amount_range: inc.amountRange,
+        forecast_amount_mode: inc.forecastAmountMode ?? "FIXED",
+        input_mode: inc.inputMode ?? "USABLE",
+        next_expected_pay_date: inc.nextExpectedPayDate ?? null,
+        is_active: inc.isActive !== false,
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.bills?.length) {
+    const { error } = await supabase.from("bills").upsert(
+      s.bills.map((b) => withUser(userId, {
+        id: b.id,
+        name: b.name,
+        amount_due: b.amountDue,
+        minimum_due: b.minimumDue,
+        current_amount_due: b.currentAmountDue,
+        recurring_rule: b.recurringRule ?? {},
+        category: b.category ?? "",
+        is_essential: b.isEssential === true,
+        status: b.status ?? "UPCOMING",
+        payment_policy: b.paymentPolicy ?? "HARD_DUE",
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.billPayments?.length) {
+    const { error } = await supabase.from("bill_payments").upsert(
+      s.billPayments.map((p) => withUser(userId, {
+        id: p.id,
+        bill_id: p.billId,
+        amount: p.amount,
+        payment_date: p.paymentDate,
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.debts?.length) {
+    const { error } = await supabase.from("debts").upsert(
+      s.debts.map((d) => withUser(userId, {
+        id: d.id,
+        name: d.name,
+        lender: d.lender ?? "",
+        type: d.type ?? "INSTALLMENT",
+        current_balance: d.currentBalance,
+        minimum_due: d.minimumDue,
+        required_due_date: d.requiredDueDate ?? null,
+        arrears_amount: d.arrearsAmount ?? 0,
+        bank_account_id: d.bankAccountId ?? null,
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.debtTransactions?.length) {
+    const { error } = await supabase.from("debt_transactions").upsert(
+      s.debtTransactions.map((t) => withUser(userId, {
+        id: t.id,
+        debt_id: t.debtId,
+        type: t.type,
+        amount: t.amount,
+        event_date: t.eventDate,
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.expenses?.length) {
+    const { error } = await supabase.from("recurring_expenses").upsert(
+      s.expenses.map((e) => withUser(userId, {
+        id: e.id,
+        name: e.name,
+        amount: e.amount,
+        recurring_rule: e.recurringRule,
+        is_essential: e.isEssential !== false,
+        is_variable: e.isVariable === true,
+        allocation_mode: e.allocationMode ?? "EVENLY",
+        one_time_date: e.oneTimeDate ?? null,
+        category_label: e.categoryLabel ?? "",
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.expenseSpends?.length) {
+    const { error } = await supabase.from("expense_spends").upsert(
+      s.expenseSpends.map((x) => withUser(userId, {
+        id: x.id,
+        expense_id: x.expenseId,
+        amount: x.amount,
+        spend_date: x.spendDate,
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.housingConfig) {
+    const hc = s.housingConfig;
+    const { error } = await supabase.from("housing_config").upsert(withUser(userId, {
+      id: "housing",
+      current_monthly_rent: hc.currentMonthlyRent,
+      minimum_acceptable_payment: hc.minimumAcceptablePayment,
+      rent_due_day: hc.rentDueDay,
+      arrangement: hc.arrangement ?? "RENT_MONTH_TO_MONTH",
+    }));
+    if (error) throw new Error(error.message);
+  }
+  if (s.housingBuckets?.length) {
+    const { error } = await supabase.from("housing_buckets").upsert(
+      s.housingBuckets.map((h) => withUser(userId, {
+        id: h.id,
+        label: h.label,
+        month_key: h.monthKey,
+        amount_due: h.amountDue,
+        amount_paid: h.amountPaid,
+        due_date: h.dueDate ?? null,
+        is_current_bucket: h.isCurrentBucket === true,
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.housingPayments?.length) {
+    const { error } = await supabase.from("housing_payments").upsert(
+      s.housingPayments.map((h) => withUser(userId, {
+        id: h.id,
+        bucket_id: h.bucketId,
+        amount: h.amount,
+        payment_date: h.paymentDate,
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.goals?.length) {
+    const { error } = await supabase.from("goals").upsert(
+      s.goals.map((g) => withUser(userId, {
+        id: g.id,
+        name: g.name,
+        target_amount: g.targetAmount,
+        current_amount: g.currentAmount,
+        is_active: g.isActive !== false,
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.paychecks?.length) {
+    const { error } = await supabase.from("paychecks").upsert(
+      s.paychecks.map((p) => withUser(userId, {
+        id: p.id,
+        income_source_id: p.incomeSourceId ?? null,
+        payer_label: p.payerLabel ?? "",
+        date: p.date,
+        amount: p.amount,
+        deposited: p.deposited === true,
+        account_id: p.accountId ?? null,
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.cashAdjustments?.length) {
+    const { error } = await supabase.from("cash_adjustments").upsert(
+      s.cashAdjustments.map((c) => withUser(userId, {
+        id: c.id,
+        account_id: c.accountId ?? null,
+        type: c.type,
+        amount: c.amount,
+        adjustment_date: c.adjustmentDate,
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.deductionRules?.length) {
+    const { error } = await supabase.from("deduction_rules").upsert(
+      s.deductionRules.map((r) => withUser(userId, {
+        id: r.id,
+        name: r.name,
+        scope: r.scope ?? "GLOBAL",
+        income_source_id: r.incomeSourceId ?? null,
+        value_type: r.valueType ?? "PERCENTAGE",
+        fixed_amount: r.fixedAmount ?? 0,
+        percentage: r.percentage ?? 0,
+        status: r.status ?? "MANDATORY",
+        is_enabled_by_default: r.isEnabledByDefault !== false,
+        notes: r.notes ?? "",
+        tags: [],
+        custom_fields: [],
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.categories?.length) {
+    const { error } = await supabase.from("user_categories").upsert(
+      s.categories.map((c) => withUser(userId, {
+        id: c.id,
+        name: c.name,
+        kind: c.kind ?? "GENERAL",
+        notes: c.notes ?? "",
+        tags: [],
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.labels?.length) {
+    const { error } = await supabase.from("custom_labels").upsert(
+      s.labels.map((l) => withUser(userId, {
+        id: l.id,
+        label: l.label,
+        notes: l.notes ?? "",
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  const { error } = await supabase.from("planner_settings").upsert({
+    user_id: userId,
+    settings: s.settings ?? {},
+    notification_settings: s.notificationSettings ?? {},
+  });
+  if (error) throw new Error(error.message);
+}
+
+export async function importPlannerBackupPackage(userId: string, pkg: PlannerBackupPackage): Promise<void> {
+  if (pkg.schemaVersion > WEB_BACKUP_SCHEMA_VERSION) {
+    throw new Error(`Backup schema ${pkg.schemaVersion} is newer than this app supports (${WEB_BACKUP_SCHEMA_VERSION}).`);
+  }
+  await deleteAllNormalizedPlannerData(userId);
+  await upsertNormalizedFromPlannerSnapshot(userId, pkg.snapshot);
 }
 
 /** Persist a bank transaction manually (used by Teller sync later; also handy for testing). */

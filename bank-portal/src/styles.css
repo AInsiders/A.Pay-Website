@@ -2691,6 +2691,70 @@ a {
   gap: 16px;
 }
 
+.fx-settings__body--home {
+  gap: 20px;
+}
+
+.fx-settings-breadcrumb {
+  font-size: 0.9rem;
+  margin-bottom: 4px;
+}
+
+.fx-settings-breadcrumb a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.fx-settings-breadcrumb a:hover {
+  text-decoration: underline;
+}
+
+.fx-settings-group-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+}
+
+@media (min-width: 820px) {
+  .fx-settings-group-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.fx-settings-group-card {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  border-radius: 18px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.fx-settings-group-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  box-shadow: 0 12px 36px -24px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.fx-settings-leaf-row {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  border-radius: 14px;
+}
+
+.fx-settings-leaf-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.fx-inline-link {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.fx-inline-link:hover {
+  text-decoration: underline;
+}
+
 /* ====================================================================== */
 /* Leftover / "what to do" action plan block                             */
 /* ====================================================================== */

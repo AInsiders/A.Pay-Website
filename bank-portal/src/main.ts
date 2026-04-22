@@ -21,28 +21,39 @@ import {
 } from "./legal-pages";
 import type { PlannerSnapshot } from "./planner-engine-shared";
 import {
+  buildPlannerBackupPackage,
   currentUserId,
+  deleteAllNormalizedPlannerData,
   deleteBill,
+  deleteCustomLabel,
   deleteDebt,
+  deleteDeductionRule,
   deleteGoal,
   deleteIncomeSource,
   deleteRecurringExpense,
+  deleteUserCategory,
   importLegacySnapshotIntoNormalized,
+  importPlannerBackupPackage,
   loadPlannerSnapshot as loadNormalizedSnapshot,
   recomputeAndPersistPlan,
   saveBill,
+  saveCustomLabel,
   saveDebt,
+  saveDeductionRule,
   saveGoal,
   saveHousingConfig,
   saveIncomeSource,
   savePlannerSettings,
+  saveNotificationSettings,
   saveRecurringExpense,
   saveTransactionCategorization,
   saveTransactionSplits,
+  saveUserCategory,
   loadTransactionAssignments,
   linkTransactionSplitsToPlannerActuals,
   upsertCategoryRuleFromAdjustment,
   type PlannerActualTarget,
+  type PlannerBackupPackage,
 } from "./planner-data";
 import {
   normalizeTellerTransactions,
@@ -65,12 +76,167 @@ type WebSetupOption = {
   subtitle: string;
   description: string;
 };
-type WebSetupGroup = {
-  title: string;
-  subtitle: string;
-  description: string;
-  options: WebSetupOption[];
+
+/** Mirrors Android `SettingsGroup` / `SettingsDestination` IA. */
+type SettingsGroupId = "setup" | "planning" | "app" | "data";
+
+type SettingsLeafId =
+  | "accounts"
+  | "bank-linking"
+  | "income"
+  | "bills"
+  | "expenses"
+  | "debts"
+  | "housing"
+  | "goals"
+  | "paycheck-rules"
+  | "planner-preferences"
+  | "profile"
+  | "organization"
+  | "notifications"
+  | "backup";
+
+type SettingsNav =
+  | { tier: "home" }
+  | { tier: "group"; group: SettingsGroupId }
+  | { tier: "leaf"; group: SettingsGroupId; leaf: SettingsLeafId };
+
+const SETTINGS_GROUP_ORDER: SettingsGroupId[] = ["setup", "planning", "app", "data"];
+
+const SETTINGS_GROUP_META: Record<SettingsGroupId, { title: string; subtitle: string; description: string }> = {
+  setup: {
+    title: "Setup",
+    subtitle: "Accounts, income, bills, expenses, debts, and housing",
+    description: "Set up the money inputs the planner needs before it can give reliable answers.",
+  },
+  planning: {
+    title: "Planning",
+    subtitle: "Goals, paycheck rules, and planning preferences",
+    description: "Shape how extra money, paycheck carve-outs, and planning preferences behave.",
+  },
+  app: {
+    title: "App",
+    subtitle: "Account, notifications, and organization",
+    description: "Profile, reminders, and the labels that keep your data easier to read.",
+  },
+  data: {
+    title: "Data",
+    subtitle: "Backup, import, export, and reset",
+    description: "Protect your data and restore it when you move devices or need a clean reset.",
+  },
 };
+
+const SETTINGS_LEAVES: Record<SettingsGroupId, SettingsLeafId[]> = {
+  setup: ["accounts", "bank-linking", "income", "bills", "expenses", "debts", "housing"],
+  planning: ["goals", "paycheck-rules", "planner-preferences"],
+  app: ["profile", "organization", "notifications"],
+  data: ["backup"],
+};
+
+const SETTINGS_LEAF_META: Record<
+  SettingsLeafId,
+  { title: string; subtitle: string; description: string; openAccounts?: boolean }
+> = {
+  accounts: {
+    title: "Accounts",
+    subtitle: "Cash, bank, wallet, and balances",
+    description: "Balances feed cash available, deposit routing, and every live plan update.",
+    openAccounts: true,
+  },
+  "bank-linking": {
+    title: "Bank linking",
+    subtitle: "Teller Connect",
+    description: "Connect financial institutions so balances and transactions sync in.",
+    openAccounts: true,
+  },
+  income: {
+    title: "Income",
+    subtitle: "Pay sources, schedules, and variability",
+    description: "Income rules drive forecast timing, scenario projections, and paycheck previews.",
+  },
+  bills: {
+    title: "Bills",
+    subtitle: "Hard dues, subscriptions, and due rules",
+    description:
+      "Add each bill you must plan for. For charges already on your bank feed, use Accounts → Tag on the transaction when auto-detect misses.",
+  },
+  expenses: {
+    title: "Expenses",
+    subtitle: "Essential and recurring living costs",
+    description: "Expenses shape essentials forecasting and tell the planner what normal life costs to expect.",
+  },
+  debts: {
+    title: "Debts",
+    subtitle: "Balances, due dates, and payoff behavior",
+    description: "Debts influence payoff strategy, feasibility, and re-borrow pressure.",
+  },
+  housing: {
+    title: "Housing",
+    subtitle: "Rent, arrears, and housing setup",
+    description: "Housing settings shape current due pressure, arrears catch-up, and payment handling.",
+  },
+  goals: {
+    title: "Goals",
+    subtitle: "Saved targets that use truly free cash",
+    description: "Goals track progress and paycheck timeline estimates without overriding protected obligations.",
+  },
+  "paycheck-rules": {
+    title: "Paycheck rules",
+    subtitle: "Deductions, savings, and paycheck carve-outs",
+    description: "Paycheck rules reduce usable pay before it reaches planning cash.",
+  },
+  "planner-preferences": {
+    title: "Planning preferences",
+    subtitle: "Buffers, payoff, feasibility, and ordering rules",
+    description: "Planning preferences adjust reserves, payoff style, safety floors, and housing strategy.",
+  },
+  profile: {
+    title: "Account & profile",
+    subtitle: "Display name, theme, and accent",
+    description: "How you appear in A.Pay and how the web app looks on this device.",
+  },
+  organization: {
+    title: "Organization",
+    subtitle: "Categories and custom labels",
+    description: "Categories and labels help group and name real-world data in a cleaner way.",
+  },
+  notifications: {
+    title: "Notifications",
+    subtitle: "Payday and planning reminders",
+    description:
+      "These preferences sync to your account. Push delivery is handled on your phone in the Android app.",
+  },
+  backup: {
+    title: "Backup & reset",
+    subtitle: "Import, export, and reset planner data",
+    description: "Export a JSON backup compatible with the mobile app, import a backup file, or wipe and start clean.",
+  },
+};
+
+function isSettingsGroupId(s: string): s is SettingsGroupId {
+  return s === "setup" || s === "planning" || s === "app" || s === "data";
+}
+
+function parseSettingsNav(hash: string): SettingsNav {
+  const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+  if (parts[0] !== "settings") return { tier: "home" };
+  const seg = parts.slice(1);
+  if (seg.length === 0) return { tier: "home" };
+  const g = seg[0]!;
+  if (!isSettingsGroupId(g)) return { tier: "home" };
+  if (seg.length === 1) return { tier: "group", group: g };
+  const leafSlug = seg[1]!;
+  const allowed = SETTINGS_LEAVES[g];
+  const leaf = allowed.find((l) => l === leafSlug);
+  if (!leaf) return { tier: "group", group: g };
+  return { tier: "leaf", group: g, leaf };
+}
+
+function settingsHashFor(nav: SettingsNav): string {
+  if (nav.tier === "home") return "#/settings";
+  if (nav.tier === "group") return `#/settings/${nav.group}`;
+  return `#/settings/${nav.group}/${nav.leaf}`;
+}
 
 const APP_ONLY_ROUTES = new Set<RouteId>(["planner", "bills", "accounts", "settings"]);
 const APP_PRIMARY_ROUTES = new Set<RouteId>(["home", "planner", "bills", "accounts", "settings"]);
@@ -107,73 +273,6 @@ const CORE_SETUP_OPTIONS: WebSetupOption[] = [
     title: "Housing",
     subtitle: "Rent or mortgage",
     description: "So safe-to-spend keeps this covered first.",
-  },
-];
-
-const WEB_SETTINGS_GROUPS: WebSetupGroup[] = [
-  {
-    title: "Setup",
-    subtitle: "Accounts, income, bills, expenses, debts, and housing",
-    description: "Set up the money inputs the planner needs before it can give reliable answers.",
-    options: [
-      ...CORE_SETUP_OPTIONS,
-      {
-        title: "Bank linking",
-        subtitle: "Teller Connect",
-        description: "Connect your bank here on the Accounts page so balances and transactions can sync in.",
-      },
-    ],
-  },
-  {
-    title: "Planning",
-    subtitle: "Goals, paycheck rules, and planning preferences",
-    description: "Shape how extra money, paycheck carve-outs, and planning preferences behave.",
-    options: [
-      {
-        title: "Goals",
-        subtitle: "Saved targets that use truly free cash",
-        description: "Track savings progress without overriding protected bills and essentials.",
-      },
-      {
-        title: "Paycheck Rules",
-        subtitle: "Deductions, savings, and paycheck carve-outs",
-        description: "Reduce usable pay before it reaches planning cash.",
-      },
-      {
-        title: "Planning Preferences",
-        subtitle: "Buffers, payoff, feasibility, and ordering rules",
-        description: "Adjust safety floors, reserve behavior, and payoff style.",
-      },
-    ],
-  },
-  {
-    title: "App",
-    subtitle: "Notifications and organization",
-    description: "Control reminders and the labels that keep your data easier to read.",
-    options: [
-      {
-        title: "Organization",
-        subtitle: "Categories and custom labels",
-        description: "Keep data grouped and named in ways that match real life.",
-      },
-      {
-        title: "Notifications",
-        subtitle: "Payday and planning reminders",
-        description: "Reminder settings live here once web editing expands.",
-      },
-    ],
-  },
-  {
-    title: "Data",
-    subtitle: "Backup, import, export, and reset",
-    description: "Protect your data and restore it when you move devices or need a clean reset.",
-    options: [
-      {
-        title: "Backup & Reset",
-        subtitle: "Import, export, and reset app data",
-        description: "Use the same live planner model when backing up or resetting.",
-      },
-    ],
   },
 ];
 
@@ -385,7 +484,10 @@ type SettingsEditorState =
   | { kind: "expense"; id?: string }
   | { kind: "goal"; id?: string }
   | { kind: "housing" }
-  | { kind: "planner-settings" };
+  | { kind: "planner-settings" }
+  | { kind: "deduction"; id?: string }
+  | { kind: "category"; id?: string }
+  | { kind: "label"; id?: string };
 
 /** One row inside the multi-split category editor. `target` is "KIND:id" (e.g. "BILL:uuid") or KIND alone for cash flows. */
 interface CategorizeSplitRow {
@@ -430,8 +532,9 @@ function normalizeRouteId(v: string): RouteId {
 }
 
 function readRouteFromHash(): RouteId {
-  const h = window.location.hash.replace(/^#\/?/, "");
-  return normalizeRouteId(h);
+  const h = window.location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+  if (h.length === 0) return "home";
+  return normalizeRouteId(h[0]!);
 }
 
 function setRoute(next: RouteId) {
@@ -1746,31 +1849,6 @@ function renderPlannerSectionJsonField(
   `;
 }
 
-function renderSetupGroups(groups: WebSetupGroup[]) {
-  const mid = Math.ceil(groups.length / 2);
-  const columns = [groups.slice(0, mid), groups.slice(mid)];
-  return `<div class="fx-layout fx-layout--split">${columns
-    .map(
-      (column) => `
-        <div class="fx-stack">
-          ${column
-            .map(
-              (group) => `
-                <section class="fx-panel">
-                  <p class="fx-eyebrow">${escapeHtml(group.title)}</p>
-                  <h2>${escapeHtml(group.subtitle)}</h2>
-                  <p class="muted">${escapeHtml(group.description)}</p>
-                  ${renderSetupOptionList(group.options, "No options in this group yet.")}
-                </section>
-              `,
-            )
-            .join("")}
-        </div>
-      `,
-    )
-    .join("")}</div>`;
-}
-
 function renderSetupStarter(
   eyebrow: string,
   title: string,
@@ -1790,7 +1868,7 @@ function renderSetupStarter(
           <p class="fx-eyebrow">Start with</p>
           <h2>The basics</h2>
           ${renderSetupOptionList(CORE_SETUP_OPTIONS, "Nothing to add yet.")}
-          <p class="muted" style="margin-top:12px">Open <a href="#/settings">Settings</a> to add them all in one place.</p>
+          <p class="muted" style="margin-top:12px">Open <a href="#/settings/setup">Settings → Setup</a> to add them in one guided place.</p>
         </section>
         <section class="fx-panel">
           <p class="fx-eyebrow">Then</p>
@@ -2061,6 +2139,111 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
   `;
 }
 
+function formatReserveKindLabel(kind: string | undefined): string {
+  switch (kind) {
+    case "BILL":
+      return "Bill";
+    case "DEBT":
+      return "Debt";
+    case "RENT":
+      return "Housing";
+    case "EXPENSE":
+      return "Expense";
+    default:
+      return kind?.replace(/_/g, " ").trim() || "Reserve";
+  }
+}
+
+/** Interval checkpoint, named reserves, suggested essential split, first failure / post-deposit copy. */
+function renderPlannerCheckpointSection(plan: PlannerPlan): string {
+  const d = plan.dashboard;
+  const required = d?.requiredCashNow ?? planProtectedAmount(plan);
+  const essentials = d?.essentialsDueForCurrentInterval;
+  const hard = d?.hardDueBeforeNextIncome;
+  const cross = d?.crossPaycheckReserveTotal;
+  const interval = d?.intervalDaysUntilNextIncome;
+  const nextInc = d?.nextReliableIncomeDate;
+
+  const intervalSentence =
+    interval != null && nextInc
+      ? `Looking ahead <strong>${interval}</strong> days until income on <strong>${escapeHtml(nextInc)}</strong>.`
+      : interval != null
+        ? `Planning interval: <strong>${interval}</strong> days until the next paycheck.`
+        : "";
+
+  const hasSplit =
+    essentials != null ||
+    hard != null ||
+    (cross != null && cross > 0);
+  const breakdown = hasSplit
+    ? `<div class="fx-checkpoint-rows">
+        ${essentials != null ? `<div class="fx-checkpoint-row"><span>Essentials (this interval)</span><strong>${money(essentials)}</strong></div>` : ""}
+        ${hard != null ? `<div class="fx-checkpoint-row"><span>Hard dues before next income</span><strong>${money(hard)}</strong></div>` : ""}
+        ${cross != null && cross > 0 ? `<div class="fx-checkpoint-row"><span>Cross-paycheck reserves</span><strong>${money(cross)}</strong></div>` : ""}
+        <div class="fx-checkpoint-row is-total"><span>Required in wallet</span><strong>${money(required)}</strong></div>
+      </div>`
+    : `<div class="fx-checkpoint-rows">
+        <div class="fx-checkpoint-row is-total"><span>Required in wallet</span><strong>${money(required)}</strong></div>
+      </div>`;
+
+  const reserves = (d?.reservesHeld ?? []).slice(0, 8);
+  const reserveChips =
+    reserves.length > 0
+      ? `<div class="fx-reserve-chips" aria-label="Named reserves">${reserves
+          .map(
+            (r) =>
+              `<span class="fx-chip" title="${escapeHtml(r.dueDate ?? "")}"><small>${escapeHtml(formatReserveKindLabel(r.reserveKind))}</small> ${escapeHtml(r.label)} · ${money(r.amount)}</span>`,
+          )
+          .join("")}</div>`
+      : "";
+
+  const essentialsChips = (d?.suggestedEssentialUse ?? []).filter((e) => e.suggestedFromSafeToSpend > 0.005).slice(0, 8);
+  const essentialChipsHtml =
+    essentialsChips.length > 0
+      ? `<p class="muted" style="margin:14px 0 0">If you spend flexible cash, essentials with headroom this interval:</p>
+         <div class="fx-essential-chips">${essentialsChips
+           .map((e) => `<span class="fx-chip">${escapeHtml(e.label)} · up to ${money(e.suggestedFromSafeToSpend)}</span>`)
+           .join("")}</div>`
+      : "";
+
+  const after = d?.safeToSpendAfterNextDeposit;
+  const nextPay = plan.nextPaycheckNeed?.nextExpectedDate;
+  const postDeposit =
+    after != null && nextPay && (planAmountShort(plan) > 0 || planSafeToSpend(plan) <= 0)
+      ? `<div class="fx-post-deposit">After the <strong>${escapeHtml(nextPay)}</strong> deposit clears, estimated flexible headroom is about <strong>${money(after)}</strong> if nothing else changes.</div>`
+      : "";
+
+  const ff = plan.firstFailure;
+  const failureBlock =
+    ff && (ff.shortage ?? 0) > 0
+      ? `<div class="fx-first-failure" role="status">
+           <strong>Short on ${escapeHtml(ff.obligationLabel ?? "protected cash")}</strong>
+           ${
+             ff.minimumRepairHint
+               ? `<p class="muted" style="margin:6px 0 0">${escapeHtml(ff.minimumRepairHint)}</p>`
+               : `<p class="muted" style="margin:6px 0 0">Short by ${money(ff.shortage ?? 0)}.</p>`
+           }
+         </div>`
+      : "";
+
+  return `
+    <section class="fx-panel fx-checkpoint-panel">
+      <p class="fx-eyebrow">Wallet checkpoint</p>
+      <h3>What cash must cover first</h3>
+      ${
+        intervalSentence
+          ? `<p class="muted" style="margin:8px 0 0">${intervalSentence}</p>`
+          : `<p class="muted" style="margin:8px 0 0">Essentials and hard bills are reserved before flexible spending.</p>`
+      }
+      ${breakdown}
+      ${reserveChips}
+      ${essentialChipsHtml}
+      ${postDeposit}
+      ${failureBlock}
+    </section>
+  `;
+}
+
 /**
  * "What to do with what's left" — when safe-to-spend > 0, show concrete,
  * tappable next moves (extra debt payoff, top off goals, save safety buffer,
@@ -2083,7 +2266,7 @@ function renderWhatToDoWithLeftover(plan: PlannerPlan, safe: number, shortAmount
       <section class="fx-doplan fx-doplan--short">
         <div class="fx-doplan__head">
           <p class="fx-eyebrow">Action plan</p>
-          <h2>Short by ${money(missing)} through your planning window</h2>
+          <h2>Short by ${money(missing)} before the next-income checkpoint</h2>
           <p class="muted">Here's the fastest path back to a safe plan.</p>
         </div>
         <ul class="fx-doplan__list">
@@ -2473,9 +2656,15 @@ function ruleSummary(rule: { type?: string; anchorDate?: string; dayOfMonth?: nu
 }
 
 function renderCrudListSection(opts: {
-  title: string; eyebrow: string; description: string; addKind: SettingsEditorState["kind"];
+  title: string; eyebrow: string; description: string;
+  addKind?: SettingsEditorState["kind"];
   items: string[]; emptyCopy: string;
 }) {
+  const addBtn = opts.addKind
+    ? `<div class="fx-planner-head__actions">
+          <button type="button" data-settings-add="${opts.addKind}" class="secondary">Add new</button>
+        </div>`
+    : "";
   return `
     <section class="fx-panel">
       <div class="fx-planner-head__row">
@@ -2484,9 +2673,7 @@ function renderCrudListSection(opts: {
           <h2>${escapeHtml(opts.title)}</h2>
           <p class="muted">${escapeHtml(opts.description)}</p>
         </div>
-        <div class="fx-planner-head__actions">
-          <button type="button" data-settings-add="${opts.addKind}" class="secondary">Add new</button>
-        </div>
+        ${addBtn}
       </div>
       ${opts.items.length
         ? `<div class="fx-mini-list">${opts.items.join("")}</div>`
@@ -2575,59 +2762,65 @@ function renderGoalRow(g: { id: string; name: string; targetAmount: number; curr
   `;
 }
 
-function renderNormalizedSettings(snap: PlannerSnapshot | null): string {
-  if (!snap) {
-    return `
+function renderDeductionRow(r: { id: string; name: string; scope?: string; valueType?: string; fixedAmount?: number; percentage?: number; status?: string }): string {
+  const vt = r.valueType === "FIXED_AMOUNT" ? `fixed ${money(r.fixedAmount ?? 0)}` : `${r.percentage ?? 0}%`;
+  return `
+    <article class="fx-mini-list__item">
+      <div>
+        <strong>${escapeHtml(r.name)}</strong>
+        <p>${escapeHtml(r.scope ?? "GLOBAL")} · ${escapeHtml(vt)} · ${escapeHtml(r.status ?? "")}</p>
+      </div>
+      <div class="row">
+        <button type="button" class="secondary" data-settings-edit="deduction" data-settings-id="${escapeAttr(r.id)}">Edit</button>
+        <button type="button" class="secondary" data-settings-delete="deduction" data-settings-id="${escapeAttr(r.id)}">Remove</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderCategoryRow(c: { id: string; name: string; kind?: string }): string {
+  return `
+    <article class="fx-mini-list__item">
+      <div>
+        <strong>${escapeHtml(c.name)}</strong>
+        <p>${escapeHtml(c.kind ?? "GENERAL")}</p>
+      </div>
+      <div class="row">
+        <button type="button" class="secondary" data-settings-edit="category" data-settings-id="${escapeAttr(c.id)}">Edit</button>
+        <button type="button" class="secondary" data-settings-delete="category" data-settings-id="${escapeAttr(c.id)}">Remove</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderLabelRow(l: { id: string; label: string }): string {
+  return `
+    <article class="fx-mini-list__item">
+      <div>
+        <strong>${escapeHtml(l.label)}</strong>
+        <p>Custom label</p>
+      </div>
+      <div class="row">
+        <button type="button" class="secondary" data-settings-edit="label" data-settings-id="${escapeAttr(l.id)}">Edit</button>
+        <button type="button" class="secondary" data-settings-delete="label" data-settings-id="${escapeAttr(l.id)}">Remove</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderSettingsLoadingBlock(): string {
+  return `
       <section class="fx-panel fx-panel--highlight">
         <p class="fx-eyebrow">Loading</p>
         <h2>Pulling your planner data…</h2>
         <p class="muted">If this hangs, make sure the latest Supabase migrations (including <code>20260423000000_planner_data_model.sql</code>) have been applied.</p>
       </section>
     `;
-  }
-  const bills = renderCrudListSection({
-    eyebrow: "Setup",
-    title: "Bills",
-    description: "Hard dues, subscriptions, and recurring amounts. The planner protects these before safe-to-spend.",
-    addKind: "bill",
-    items: snap.bills.map(renderBillRow),
-    emptyCopy: "No bills yet. Add Electricity, Rent, Phone, etc. to start protecting money for them.",
-  });
-  const income = renderCrudListSection({
-    eyebrow: "Setup",
-    title: "Income sources",
-    description: "Paychecks and other recurring income that fund the plan.",
-    addKind: "income",
-    items: snap.incomeSources.map(renderIncomeRow),
-    emptyCopy: "Add at least one income source so the planner can forecast future paychecks.",
-  });
-  const debts = renderCrudListSection({
-    eyebrow: "Setup",
-    title: "Debts",
-    description: "Balances and minimums we must protect with cash or paychecks.",
-    addKind: "debt",
-    items: snap.debts.map(renderDebtRow),
-    emptyCopy: "No debts recorded. Add credit cards, loans, or other balances you owe.",
-  });
-  const expenses = renderCrudListSection({
-    eyebrow: "Setup",
-    title: "Recurring expenses",
-    description: "Essential and optional recurring spending like gas, groceries, and services.",
-    addKind: "expense",
-    items: snap.expenses.map(renderExpenseRow),
-    emptyCopy: "Add groceries, gas, internet, etc. Mark the ones that must stay funded.",
-  });
-  const goals = renderCrudListSection({
-    eyebrow: "Planning",
-    title: "Goals",
-    description: "Targets that fund from truly free cash without breaking protected bills.",
-    addKind: "goal",
-    items: snap.goals.map(renderGoalRow),
-    emptyCopy: "No goals yet. Add savings targets to direct extra cash once the plan is fully funded.",
-  });
+}
 
+function renderHousingPanel(snap: PlannerSnapshot): string {
   const hc = snap.housingConfig;
-  const housing = `
+  return `
     <section class="fx-panel">
       <div class="fx-planner-head__row">
         <div>
@@ -2659,14 +2852,16 @@ function renderNormalizedSettings(snap: PlannerSnapshot | null): string {
         : ""}
     </section>
   `;
+}
 
-  const plannerSettings = `
+function renderPlannerPrefsSummary(snap: PlannerSnapshot): string {
+  return `
     <section class="fx-panel">
       <div class="fx-planner-head__row">
         <div>
           <p class="fx-eyebrow">Planning</p>
           <h2>Planner preferences</h2>
-          <p class="muted">Scenario mode, horizon window, and safety buffer.</p>
+          <p class="muted">Scenario mode, horizon window, safety buffer, and advanced engine knobs.</p>
         </div>
         <div class="fx-planner-head__actions">
           <button type="button" data-settings-add="planner-settings" class="secondary">Edit preferences</button>
@@ -2677,11 +2872,213 @@ function renderNormalizedSettings(snap: PlannerSnapshot | null): string {
         <article class="fx-mini-list__item"><div><strong>Horizon</strong><p>${snap.settings.horizonDays ?? 120} days forecast</p></div></article>
         <article class="fx-mini-list__item"><div><strong>Safety buffer</strong><p>${money(snap.settings.targetBuffer ?? 0)}</p></div></article>
         <article class="fx-mini-list__item"><div><strong>Style</strong><p>${escapeHtml(snap.settings.planningStyle ?? "BALANCED")}</p></div></article>
+        <article class="fx-mini-list__item"><div><strong>Safety floor cash</strong><p>${money(snap.settings.safetyFloorCash ?? 0)}</p></div></article>
+        <article class="fx-mini-list__item"><div><strong>Reserve window (days)</strong><p>${snap.settings.reserveNearFutureWindowDays ?? "—"}</p></div></article>
       </div>
     </section>
   `;
+}
 
-  return `${bills}${income}${debts}${expenses}${goals}${housing}${plannerSettings}`;
+function renderSettingsLeafInner(snap: PlannerSnapshot, leaf: SettingsLeafId): string {
+  const openAccountsCta = `
+    <section class="fx-panel">
+      <p class="fx-eyebrow">Accounts</p>
+      <h2>Manage on the Accounts tab</h2>
+      <p class="muted">Balances, bank linking (Teller), and transaction tagging all live together so you can connect the bank and categorize charges in one place.</p>
+      <p style="margin-top:12px"><a class="fx-inline-link" href="#/accounts">Open Accounts</a></p>
+    </section>
+  `;
+  switch (leaf) {
+    case "accounts":
+    case "bank-linking":
+      return openAccountsCta;
+    case "income":
+      return renderCrudListSection({
+        eyebrow: "Setup",
+        title: "Income",
+        description: "Paychecks and other recurring income that fund the plan.",
+        addKind: "income",
+        items: snap.incomeSources.map(renderIncomeRow),
+        emptyCopy: "Add at least one income source so the planner can forecast future paychecks.",
+      });
+    case "bills": {
+      const hint = `
+        <p class="muted" style="margin-bottom:14px">
+          Already see the charge on your bank statement? Open
+          <a href="#/accounts">Accounts</a>, pick the account, then use <strong>Tag</strong> on the transaction to match it to a bill (or split it) when auto-detect does not pick it up.
+        </p>`;
+      return `${hint}${renderCrudListSection({
+        eyebrow: "Setup",
+        title: "Bills",
+        description: "Hard dues, subscriptions, and recurring amounts. The planner protects these before safe-to-spend.",
+        addKind: "bill",
+        items: snap.bills.map(renderBillRow),
+        emptyCopy: "No bills yet. Add Electricity, Rent, Phone, etc. to start protecting money for them.",
+      })}`;
+    }
+    case "expenses":
+      return renderCrudListSection({
+        eyebrow: "Setup",
+        title: "Recurring expenses",
+        description: "Essential and optional recurring spending like gas, groceries, and services.",
+        addKind: "expense",
+        items: snap.expenses.map(renderExpenseRow),
+        emptyCopy: "Add groceries, gas, internet, etc. Mark the ones that must stay funded.",
+      });
+    case "debts":
+      return renderCrudListSection({
+        eyebrow: "Setup",
+        title: "Debts",
+        description: "Balances and minimums we must protect with cash or paychecks.",
+        addKind: "debt",
+        items: snap.debts.map(renderDebtRow),
+        emptyCopy: "No debts recorded. Add credit cards, loans, or other balances you owe.",
+      });
+    case "housing":
+      return renderHousingPanel(snap);
+    case "goals":
+      return renderCrudListSection({
+        eyebrow: "Planning",
+        title: "Goals",
+        description: "Targets that fund from truly free cash without breaking protected bills.",
+        addKind: "goal",
+        items: snap.goals.map(renderGoalRow),
+        emptyCopy: "No goals yet. Add savings targets to direct extra cash once the plan is fully funded.",
+      });
+    case "paycheck-rules":
+      return renderCrudListSection({
+        eyebrow: "Planning",
+        title: "Paycheck rules",
+        description: "Deductions and carve-outs that reduce usable pay before planning runs.",
+        addKind: "deduction",
+        items: snap.deductionRules.map(renderDeductionRow),
+        emptyCopy: "No deduction rules yet. Add taxes, retirement, or other paycheck subtractions.",
+      });
+    case "planner-preferences":
+      return renderPlannerPrefsSummary(snap);
+    case "organization": {
+      const cats = renderCrudListSection({
+        eyebrow: "App",
+        title: "Categories",
+        description: "User-defined categories for grouping planner data.",
+        addKind: "category",
+        items: snap.categories.map(renderCategoryRow),
+        emptyCopy: "No custom categories yet.",
+      });
+      const labs = renderCrudListSection({
+        eyebrow: "App",
+        title: "Custom labels",
+        description: "Short labels you can attach for clearer reporting.",
+        addKind: "label",
+        items: snap.labels.map(renderLabelRow),
+        emptyCopy: "No custom labels yet.",
+      });
+      return `${cats}${labs}`;
+    }
+    case "notifications": {
+      const n = snap.notificationSettings;
+      return `
+        <section class="fx-panel">
+          <p class="fx-eyebrow">App</p>
+          <h2>Notification preferences</h2>
+          <p class="muted">Saved to your account. Push delivery runs on the Android app.</p>
+          <form id="form-notification-settings" class="list" style="margin-top:12px">
+            <label class="field fx-checkbox">
+              <input type="checkbox" name="paydayNotificationsEnabled"${n.paydayNotificationsEnabled ? " checked" : ""}/>
+              <span>Payday reminders</span>
+            </label>
+            <label class="field fx-checkbox">
+              <input type="checkbox" name="recalculateRemindersEnabled"${n.recalculateRemindersEnabled ? " checked" : ""}/>
+              <span>Planning / recalculate reminders</span>
+            </label>
+            <label class="field">Minutes before payday to remind<input type="number" name="paydayLeadMinutes" min="0" step="15" value="${escapeAttr(n.paydayLeadMinutes ?? 60)}" /></label>
+            <label class="field">Reminder hour (0–23)<input type="number" name="recalculateReminderHour" min="0" max="23" value="${escapeAttr(n.recalculateReminderHour ?? 18)}" /></label>
+            <label class="field">Reminder minute (0–59)<input type="number" name="recalculateReminderMinute" min="0" max="59" value="${escapeAttr(n.recalculateReminderMinute ?? 0)}" /></label>
+            <div class="row" style="margin-top:8px">
+              <button type="submit" ${state.normalizedSnapshotBusy ? "disabled" : ""}>Save notification settings</button>
+            </div>
+          </form>
+        </section>
+      `;
+    }
+    case "backup":
+      return `
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Data</p>
+          <h2>Backup &amp; reset</h2>
+          <p class="muted">Export a JSON file (same shape as the Android app backup). Import replaces all planner rows for this account. Reset deletes everything — export first.</p>
+          <div class="row" style="flex-wrap:wrap;gap:10px;margin-top:14px">
+            <button type="button" id="btn-backup-export">Export backup</button>
+            <button type="button" class="secondary" id="btn-backup-import">Import backup…</button>
+            <input type="file" id="input-backup-import" accept="application/json,.json" style="display:none" />
+            <button type="button" class="danger" id="btn-backup-reset">Reset all planner data…</button>
+          </div>
+        </section>
+      `;
+    case "profile":
+      return ""; // rendered by renderSettingsProfileSection in workspace
+    default:
+      return "";
+  }
+}
+
+function renderSettingsBreadcrumb(nav: SettingsNav): string {
+  if (nav.tier === "home") {
+    return `<nav class="fx-settings-breadcrumb" aria-label="Settings"><span class="muted">Settings</span></nav>`;
+  }
+  if (nav.tier === "group") {
+    const meta = SETTINGS_GROUP_META[nav.group];
+    return `<nav class="fx-settings-breadcrumb" aria-label="Settings">
+      <a href="#/settings">Settings</a>
+      <span aria-hidden="true"> / </span>
+      <span>${escapeHtml(meta.title)}</span>
+    </nav>`;
+  }
+  const gmeta = SETTINGS_GROUP_META[nav.group];
+  const lmeta = SETTINGS_LEAF_META[nav.leaf];
+  return `<nav class="fx-settings-breadcrumb" aria-label="Settings">
+      <a href="#/settings">Settings</a>
+      <span aria-hidden="true"> / </span>
+      <a href="#/settings/${nav.group}">${escapeHtml(gmeta.title)}</a>
+      <span aria-hidden="true"> / </span>
+      <span>${escapeHtml(lmeta.title)}</span>
+    </nav>`;
+}
+
+function renderSettingsProfileSection(profile: Profile | null, accent: string, mode: "dark" | "light", busy: boolean): string {
+  return `
+        <section class="fx-panel fx-panel--highlight">
+          <p class="fx-eyebrow">App</p>
+          <h2>Account &amp; profile</h2>
+          <form id="form-profile" class="list">
+            <label class="field">Display name<input name="display_name" type="text" value="${escapeHtml(profile?.display_name ?? "")}" placeholder="First name or nickname" /></label>
+            <input type="hidden" name="accent_color" id="field-accent" value="${escapeHtml(accent)}" />
+            <div class="field">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+                <span style="font-weight:600">Mode</span>
+                <div class="fx-seg" role="group" aria-label="Theme mode">
+                  <button type="button" class="fx-seg__btn${mode === "dark" ? " is-active" : ""}" data-mode="dark" aria-pressed="${mode === "dark" ? "true" : "false"}">Dark</button>
+                  <button type="button" class="fx-seg__btn${mode === "light" ? " is-active" : ""}" data-mode="light" aria-pressed="${mode === "light" ? "true" : "false"}">Light</button>
+                </div>
+              </div>
+              <input type="hidden" name="theme_mode" id="field-mode" value="${escapeHtml(mode)}" />
+            </div>
+            <div class="field">
+              <span style="font-weight:600">Accent color</span>
+              <div class="fx-theme-grid" id="theme-presets" role="group" aria-label="Theme presets">
+                ${themePresetButtons(accent)}
+              </div>
+              <div class="fx-color-row" style="margin-top:8px">
+                <label class="field">Custom accent<input id="field-color-picker" type="color" value="${escapeHtml(accent)}" aria-label="Custom accent color" /></label>
+              </div>
+            </div>
+            <div class="row" style="margin-top:4px">
+              <button type="submit" ${busy ? "disabled" : ""}>Save profile</button>
+            </div>
+            ${state.info ? `<p class="success">${escapeHtml(state.info)}</p>` : ""}
+          </form>
+        </section>
+  `;
 }
 
 // ========================================================================
@@ -2872,12 +3269,70 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
       `;
       break;
     }
+    case "deduction": {
+      const existing = snap && editor.id ? find(snap.deductionRules, editor.id) : undefined;
+      deletable = Boolean(existing);
+      title = existing ? `Edit deduction — ${existing.name}` : "Add paycheck deduction";
+      body = `
+        <label class="field">Name<input name="name" required value="${escapeAttr(existing?.name ?? "")}" /></label>
+        <div class="field">
+          <span style="font-weight:600">Scope</span>
+          <select name="scope">
+            <option value="GLOBAL"${(existing?.scope ?? "GLOBAL") === "GLOBAL" ? " selected" : ""}>All paychecks</option>
+            <option value="INCOME_SOURCE"${existing?.scope === "INCOME_SOURCE" ? " selected" : ""}>One income source</option>
+          </select>
+        </div>
+        <label class="field">Income source id (if scoped)<input name="incomeSourceId" value="${escapeAttr(existing?.incomeSourceId ?? "")}" placeholder="UUID from Income list" /></label>
+        <div class="field">
+          <span style="font-weight:600">Value type</span>
+          <select name="valueType">
+            <option value="PERCENTAGE"${(existing?.valueType ?? "PERCENTAGE") === "PERCENTAGE" ? " selected" : ""}>Percent of gross</option>
+            <option value="FIXED_AMOUNT"${existing?.valueType === "FIXED_AMOUNT" ? " selected" : ""}>Fixed dollars</option>
+          </select>
+        </div>
+        <label class="field">Percentage (0–1 if decimal, or use whole e.g. 0.15 for 15%)<input name="percentage" type="number" step="0.0001" value="${escapeAttr(existing?.percentage ?? 0)}" /></label>
+        <label class="field">Fixed amount<input name="fixedAmount" type="number" step="0.01" value="${escapeAttr(existing?.fixedAmount ?? 0)}" /></label>
+        <div class="field">
+          <span style="font-weight:600">Status</span>
+          <select name="status">
+            <option value="MANDATORY"${(existing?.status ?? "MANDATORY") === "MANDATORY" ? " selected" : ""}>Mandatory</option>
+            <option value="OPTIONAL"${existing?.status === "OPTIONAL" ? " selected" : ""}>Optional</option>
+          </select>
+        </div>
+        <label class="field"><input name="isEnabledByDefault" type="checkbox"${existing?.isEnabledByDefault !== false ? " checked" : ""}/> Enabled by default</label>
+        <label class="field">Notes<input name="notes" value="${escapeAttr(existing?.notes ?? "")}" /></label>
+      `;
+      break;
+    }
+    case "category": {
+      const existing = snap && editor.id ? find(snap.categories, editor.id) : undefined;
+      deletable = Boolean(existing);
+      title = existing ? `Edit category — ${existing.name}` : "Add category";
+      body = `
+        <label class="field">Name<input name="name" required value="${escapeAttr(existing?.name ?? "")}" /></label>
+        <label class="field">Kind<input name="kind" value="${escapeAttr(existing?.kind ?? "GENERAL")}" placeholder="GENERAL" /></label>
+        <label class="field">Notes<input name="notes" value="${escapeAttr(existing?.notes ?? "")}" /></label>
+      `;
+      break;
+    }
+    case "label": {
+      const existing = snap && editor.id ? find(snap.labels, editor.id) : undefined;
+      deletable = Boolean(existing);
+      title = existing ? `Edit label — ${existing.label}` : "Add custom label";
+      body = `
+        <label class="field">Label text<input name="label" required value="${escapeAttr(existing?.label ?? "")}" /></label>
+        <label class="field">Notes<input name="notes" value="${escapeAttr(existing?.notes ?? "")}" /></label>
+      `;
+      break;
+    }
     case "planner-settings": {
       const s = snap?.settings ?? { targetBuffer: 0, horizonDays: 120, selectedScenarioMode: "FIXED", planningStyle: "BALANCED" };
       title = "Planner preferences";
       body = `
-        <label class="field">Safety buffer cash<input name="targetBuffer" type="number" step="0.01" value="${escapeAttr(s.targetBuffer ?? 0)}" /></label>
+        <label class="field">Safety buffer (extra cash target)<input name="targetBuffer" type="number" step="0.01" value="${escapeAttr(s.targetBuffer ?? 0)}" /></label>
+        <label class="field">Safety floor — minimum cash to keep<input name="safetyFloorCash" type="number" step="0.01" value="${escapeAttr(s.safetyFloorCash ?? 0)}" /></label>
         <label class="field">Horizon days<input name="horizonDays" type="number" min="30" max="365" value="${escapeAttr(s.horizonDays ?? 120)}" /></label>
+        <label class="field">Reserve near-future window (days)<input name="reserveNearFutureWindowDays" type="number" min="1" max="60" value="${escapeAttr(s.reserveNearFutureWindowDays ?? 21)}" /></label>
         <div class="field">
           <span style="font-weight:600">Scenario mode</span>
           <select name="selectedScenarioMode">
@@ -2889,6 +3344,23 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
             ].map((m) => `<option value="${m.value}"${s.selectedScenarioMode === m.value ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("")}
           </select>
         </div>
+        <div class="field">
+          <span style="font-weight:600">Planning style</span>
+          <select name="planningStyle">
+            ${["BALANCED", "SURVIVAL", "AGGRESSIVE_SAVE"].map((ps) =>
+              `<option value="${ps}"${(s.planningStyle ?? "BALANCED") === ps ? " selected" : ""}>${escapeHtml(ps)}</option>`,
+            ).join("")}
+          </select>
+        </div>
+        <label class="field">Currency (ISO)<input name="currency" value="${escapeAttr(s.currency ?? "USD")}" /></label>
+        <label class="field">IANA timezone<input name="timezone" value="${escapeAttr(s.timezone ?? "UTC")}" placeholder="America/Chicago" /></label>
+        <label class="field fx-checkbox"><input name="allowNegativeCash" type="checkbox"${s.allowNegativeCash ? " checked" : ""}/> Allow plan to go negative (advanced)</label>
+        <label class="field fx-checkbox"><input name="sameDayIncomeBeforeSameDayBills" type="checkbox"${(s.sameDayIncomeBeforeSameDayBills ?? true) ? " checked" : ""}/> Same day: income before bills</label>
+        <label class="field">Optimization goal<input name="optimizationGoal" value="${escapeAttr(s.optimizationGoal ?? "BALANCED")}" placeholder="BALANCED" /></label>
+        <label class="field">Payoff mode<input name="payoffMode" value="${escapeAttr(s.payoffMode ?? "SNOWBALL")}" placeholder="SNOWBALL" /></label>
+        <label class="field">Housing payment mode<input name="housingPaymentMode" value="${escapeAttr(s.housingPaymentMode ?? "MINIMUM_CURRENT")}" /></label>
+        <label class="field">Housing payoff target mode<input name="housingPayoffTargetMode" value="${escapeAttr(s.housingPayoffTargetMode ?? "REGULAR_DEBTS_ONLY")}" /></label>
+        <label class="field">Engine priority order (comma-separated)<input name="priorityOrder" value="${escapeAttr(s.priorityOrder ?? "")}" placeholder="ESSENTIALS,OVERDUE_ITEMS,..." /></label>
       `;
       break;
     }
@@ -2918,51 +3390,82 @@ function renderSettingsWorkspace(
   mode: "dark" | "light",
   busy: boolean,
   plannerState: PlannerStateRow | null,
+  settingsNav: SettingsNav,
 ) {
   void plannerState;
+  const snap = state.normalizedSnapshot;
+
+  if (settingsNav.tier === "home") {
+    const cards = SETTINGS_GROUP_ORDER.map((gid) => {
+      const m = SETTINGS_GROUP_META[gid];
+      return `
+        <a class="fx-settings-group-card fx-panel" href="#/settings/${gid}">
+          <p class="fx-eyebrow">${escapeHtml(m.title)}</p>
+          <h2>${escapeHtml(m.subtitle)}</h2>
+          <p class="muted">${escapeHtml(m.description)}</p>
+        </a>`;
+    }).join("");
+    return `
+    <div class="fx-settings">
+      ${renderSettingsBreadcrumb(settingsNav)}
+      <div class="fx-settings__body fx-settings__body--home">
+        <section class="fx-panel fx-panel--highlight">
+          <p class="fx-eyebrow">Settings</p>
+          <h1>Planner setup</h1>
+          <p class="muted">Same sections as the mobile app. Pick a group to add or edit accounts, bills, planning rules, and more.</p>
+        </section>
+        <div class="fx-settings-group-grid">${cards}</div>
+      </div>
+    </div>`;
+  }
+
+  if (settingsNav.tier === "group") {
+    const g = settingsNav.group;
+    const meta = SETTINGS_GROUP_META[g];
+    const leaves = SETTINGS_LEAVES[g].map((leaf) => {
+      const lm = SETTINGS_LEAF_META[leaf];
+      return `
+        <a class="fx-mini-list__item fx-settings-leaf-row" href="#/settings/${g}/${leaf}">
+          <div>
+            <strong>${escapeHtml(lm.title)}</strong>
+            <p class="muted">${escapeHtml(lm.subtitle)} — ${escapeHtml(lm.description)}</p>
+          </div>
+        </a>`;
+    }).join("");
+    return `
+    <div class="fx-settings">
+      ${renderSettingsBreadcrumb(settingsNav)}
+      <div class="fx-settings__body">
+        <section class="fx-panel fx-panel--highlight">
+          <p class="fx-eyebrow">${escapeHtml(meta.title)}</p>
+          <h1>${escapeHtml(meta.subtitle)}</h1>
+          <p class="muted">${escapeHtml(meta.description)}</p>
+        </section>
+        <div class="fx-mini-list">${leaves}</div>
+      </div>
+    </div>`;
+  }
+
+  const leaf = settingsNav.leaf;
+  const lmeta = SETTINGS_LEAF_META[leaf];
+  const bodyInner = !snap
+    ? renderSettingsLoadingBlock()
+    : leaf === "profile"
+      ? renderSettingsProfileSection(profile, accent, mode, busy)
+      : renderSettingsLeafInner(snap, leaf);
+
   return `
     <div class="fx-settings">
-      <div class="fx-settings__top">
-        <section class="fx-panel fx-panel--highlight">
-          <p class="fx-eyebrow">Profile</p>
-          <h2>Your account</h2>
-          <form id="form-profile" class="list">
-            <label class="field">Display name<input name="display_name" type="text" value="${escapeHtml(profile?.display_name ?? "")}" placeholder="First name or nickname" /></label>
-            <input type="hidden" name="accent_color" id="field-accent" value="${escapeHtml(accent)}" />
-            <div class="field">
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
-                <span style="font-weight:600">Mode</span>
-                <div class="fx-seg" role="group" aria-label="Theme mode">
-                  <button type="button" class="fx-seg__btn${mode === "dark" ? " is-active" : ""}" data-mode="dark" aria-pressed="${mode === "dark" ? "true" : "false"}">Dark</button>
-                  <button type="button" class="fx-seg__btn${mode === "light" ? " is-active" : ""}" data-mode="light" aria-pressed="${mode === "light" ? "true" : "false"}">Light</button>
-                </div>
-              </div>
-              <input type="hidden" name="theme_mode" id="field-mode" value="${escapeHtml(mode)}" />
-            </div>
-            <div class="row" style="margin-top:4px">
-              <button type="submit" ${busy ? "disabled" : ""}>Save profile</button>
-            </div>
-            ${state.info ? `<p class="success">${escapeHtml(state.info)}</p>` : ""}
-          </form>
-        </section>
-
-        <section class="fx-panel">
-          <p class="fx-eyebrow">Accent</p>
-          <h2>Theme color</h2>
-          <div class="fx-theme-grid" id="theme-presets" role="group" aria-label="Theme presets">
-            ${themePresetButtons(accent)}
-          </div>
-          <div class="fx-color-row">
-            <label class="field">Custom accent<input id="field-color-picker" type="color" value="${escapeHtml(accent)}" aria-label="Custom accent color" /></label>
-          </div>
-        </section>
-      </div>
-
+      ${renderSettingsBreadcrumb(settingsNav)}
       <div class="fx-settings__body">
-        ${renderNormalizedSettings(state.normalizedSnapshot)}
+        <section class="fx-panel fx-panel--highlight">
+          <p class="fx-eyebrow">${escapeHtml(SETTINGS_GROUP_META[settingsNav.group].title)}</p>
+          <h1>${escapeHtml(lmeta.title)}</h1>
+          <p class="muted">${escapeHtml(lmeta.description)}</p>
+        </section>
+        ${bodyInner}
       </div>
-    </div>
-  `;
+    </div>`;
 }
 
 function renderApp() {
@@ -3039,7 +3542,7 @@ function renderApp() {
         : state.route === "accounts"
           ? renderAccountsWorkspace(rows, txRows, tellerConfigured(), state.busy, state.error)
           : state.route === "settings"
-            ? renderSettingsWorkspace(profile, accent, mode, state.busy, plannerState)
+            ? renderSettingsWorkspace(profile, accent, mode, state.busy, plannerState, parseSettingsNav(window.location.hash))
             : state.route === "privacy" || state.route === "terms" || state.route === "about" || state.route === "contact"
               ? renderSignedInInfoPage(state.route)
               : renderAppHome(plannerState, plan);
@@ -3576,6 +4079,97 @@ function wireApp() {
     await saveProfile({ display_name: display_name || null, accent_color, theme_mode });
   });
 
+  document.querySelector<HTMLFormElement>("#form-notification-settings")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const userId = state.session?.user?.id;
+    if (!userId) return;
+    const fd = new FormData(e.target as HTMLFormElement);
+    try {
+      await saveNotificationSettings(userId, {
+        paydayNotificationsEnabled: fd.get("paydayNotificationsEnabled") === "on",
+        recalculateRemindersEnabled: fd.get("recalculateRemindersEnabled") === "on",
+        paydayLeadMinutes: Math.trunc(Number(fd.get("paydayLeadMinutes")) || 0),
+        recalculateReminderHour: Math.trunc(Number(fd.get("recalculateReminderHour")) || 0),
+        recalculateReminderMinute: Math.trunc(Number(fd.get("recalculateReminderMinute")) || 0),
+      });
+      state.info = "Notification preferences saved.";
+      await loadNormalizedAndRecompute({ persist: true });
+    } catch (err) {
+      state.error = err instanceof Error ? err.message : String(err);
+    }
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#btn-backup-export")?.addEventListener("click", async () => {
+    const userId = state.session?.user?.id;
+    if (!userId) return;
+    try {
+      state.busy = true;
+      render();
+      const pkg = await buildPlannerBackupPackage(userId, "web-bank-portal");
+      const blob = new Blob([JSON.stringify(pkg, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `apay-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      state.info = "Backup downloaded.";
+    } catch (err) {
+      state.error = err instanceof Error ? err.message : String(err);
+    }
+    state.busy = false;
+    render();
+  });
+
+  const backupImportInput = document.querySelector<HTMLInputElement>("#input-backup-import");
+  document.querySelector<HTMLButtonElement>("#btn-backup-import")?.addEventListener("click", () => {
+    backupImportInput?.click();
+  });
+  backupImportInput?.addEventListener("change", async () => {
+    const file = backupImportInput.files?.[0];
+    const userId = state.session?.user?.id;
+    if (!file || !userId) return;
+    if (!confirm("Import replaces ALL planner data for this account with the backup file. Continue?")) {
+      backupImportInput.value = "";
+      return;
+    }
+    try {
+      state.busy = true;
+      render();
+      const text = await file.text();
+      const parsed = JSON.parse(text) as PlannerBackupPackage;
+      if (typeof parsed.schemaVersion !== "number" || !parsed.snapshot) {
+        throw new Error("Invalid backup file.");
+      }
+      await importPlannerBackupPackage(userId, parsed);
+      await loadNormalizedAndRecompute({ persist: true });
+      await refreshBankData();
+      state.info = "Backup imported. Your planner was rebuilt from the file.";
+    } catch (err) {
+      state.error = err instanceof Error ? err.message : String(err);
+    }
+    backupImportInput.value = "";
+    state.busy = false;
+    render();
+  });
+
+  document.querySelector<HTMLButtonElement>("#btn-backup-reset")?.addEventListener("click", async () => {
+    const userId = state.session?.user?.id;
+    if (!userId) return;
+    if (!confirm("Delete ALL planner data for this account? This cannot be undone. Export a backup first if you need a copy.")) return;
+    try {
+      state.busy = true;
+      render();
+      await deleteAllNormalizedPlannerData(userId);
+      await loadNormalizedAndRecompute({ persist: true });
+      state.info = "Planner data reset.";
+    } catch (err) {
+      state.error = err instanceof Error ? err.message : String(err);
+    }
+    state.busy = false;
+    render();
+  });
+
   document.querySelector<HTMLFormElement>("#form-planner-sections")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     try {
@@ -4007,11 +4601,7 @@ function wireSettingsEditorButtons() {
     btn.addEventListener("click", () => {
       const kind = btn.getAttribute("data-settings-add") as SettingsEditorState["kind"] | null;
       if (!kind) return;
-      state.settingsEditor = kind === "housing"
-        ? { kind }
-        : kind === "planner-settings"
-          ? { kind }
-          : { kind } as SettingsEditorState;
+      state.settingsEditor = { kind } as SettingsEditorState;
       state.error = null;
       render();
     });
@@ -4041,6 +4631,9 @@ function wireSettingsEditorButtons() {
           case "debt": await deleteDebt(userId, id); break;
           case "expense": await deleteRecurringExpense(userId, id); break;
           case "goal": await deleteGoal(userId, id); break;
+          case "deduction": await deleteDeductionRule(userId, id); break;
+          case "category": await deleteUserCategory(userId, id); break;
+          case "label": await deleteCustomLabel(userId, id); break;
         }
       }, "Removed and recomputed.");
     });
@@ -4072,6 +4665,9 @@ function wireSettingsEditorButtons() {
           case "debt": await deleteDebt(userId, id); break;
           case "expense": await deleteRecurringExpense(userId, id); break;
           case "goal": await deleteGoal(userId, id); break;
+          case "deduction": await deleteDeductionRule(userId, id); break;
+          case "category": await deleteUserCategory(userId, id); break;
+          case "label": await deleteCustomLabel(userId, id); break;
         }
       }, "Removed and recomputed.");
       state.settingsEditor = null;
@@ -4163,11 +4759,52 @@ async function submitSettingsEditor(form: HTMLFormElement) {
           arrangement: getStr("arrangement"),
         });
         break;
+      case "deduction":
+        await saveDeductionRule(userId, {
+          id,
+          name: getStr("name"),
+          scope: (getStr("scope") as "GLOBAL" | "INCOME_SOURCE") || "GLOBAL",
+          incomeSourceId: getStr("incomeSourceId") || null,
+          valueType: (getStr("valueType") as "PERCENTAGE" | "FIXED_AMOUNT") || "PERCENTAGE",
+          fixedAmount: getNum("fixedAmount") ?? 0,
+          percentage: getNum("percentage") ?? 0,
+          status: getStr("status") || "MANDATORY",
+          isEnabledByDefault: fd.get("isEnabledByDefault") === "on",
+          notes: getStr("notes"),
+        });
+        break;
+      case "category":
+        await saveUserCategory(userId, {
+          id,
+          name: getStr("name"),
+          kind: getStr("kind") || "GENERAL",
+          notes: getStr("notes"),
+        });
+        break;
+      case "label":
+        await saveCustomLabel(userId, {
+          id,
+          label: getStr("label"),
+          notes: getStr("notes"),
+        });
+        break;
       case "planner-settings":
         await savePlannerSettings(userId, {
           targetBuffer: getNum("targetBuffer") ?? 0,
+          safetyFloorCash: getNum("safetyFloorCash") ?? 0,
           horizonDays: getNum("horizonDays") ?? 120,
+          reserveNearFutureWindowDays: getNum("reserveNearFutureWindowDays") ?? undefined,
           selectedScenarioMode: (getStr("selectedScenarioMode") as "FIXED" | "LOWEST_INCOME" | "MOST_EFFICIENT" | "HIGHEST_INCOME") || "FIXED",
+          planningStyle: getStr("planningStyle") || undefined,
+          currency: getStr("currency") || undefined,
+          timezone: getStr("timezone") || undefined,
+          allowNegativeCash: fd.get("allowNegativeCash") === "on",
+          sameDayIncomeBeforeSameDayBills: fd.get("sameDayIncomeBeforeSameDayBills") === "on",
+          optimizationGoal: getStr("optimizationGoal") || undefined,
+          payoffMode: getStr("payoffMode") || undefined,
+          housingPaymentMode: getStr("housingPaymentMode") || undefined,
+          housingPayoffTargetMode: getStr("housingPayoffTargetMode") || undefined,
+          priorityOrder: getStr("priorityOrder") || undefined,
         });
         break;
     }

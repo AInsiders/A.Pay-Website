@@ -188,11 +188,72 @@ export interface SnapshotCashAdjustment {
   adjustmentDate: string;
 }
 
+/** Matches Android `PaycheckDeductionRule` / `deduction_rules` table. */
+export interface SnapshotDeductionRule {
+  id: string;
+  name: string;
+  scope?: "GLOBAL" | "INCOME_SOURCE";
+  incomeSourceId?: string | null;
+  valueType?: "PERCENTAGE" | "FIXED_AMOUNT";
+  fixedAmount?: number;
+  percentage?: number;
+  status?: string;
+  isEnabledByDefault?: boolean;
+  notes?: string;
+}
+
+/** Matches `user_categories`. */
+export interface SnapshotUserCategory {
+  id: string;
+  name: string;
+  kind?: string;
+  notes?: string;
+}
+
+/** Matches `custom_labels`. */
+export interface SnapshotCustomLabel {
+  id: string;
+  label: string;
+  notes?: string;
+}
+
+/** Matches Android `NotificationSettings` (persisted in `planner_settings.notification_settings`). */
+export interface NotificationSettingsSnapshot {
+  id?: string;
+  paydayNotificationsEnabled?: boolean;
+  recalculateRemindersEnabled?: boolean;
+  paydayLeadMinutes?: number;
+  recalculateReminderHour?: number;
+  recalculateReminderMinute?: number;
+}
+
+export interface ExportMetadataSnapshot {
+  id?: string;
+  schemaVersion?: number;
+  appVersion?: string;
+  lastExportAt?: string | null;
+  lastImportAt?: string | null;
+  lastFileName?: string | null;
+}
+
 export interface PlannerSettingsSnapshot {
   targetBuffer?: number;
   selectedScenarioMode?: PlannerScenarioMode;
   planningStyle?: string;
   horizonDays?: number;
+  /** Extended fields stored in JSON; TS engine may ignore until parity. */
+  safetyFloorCash?: number;
+  reserveNearFutureWindowDays?: number;
+  currency?: string;
+  timezone?: string;
+  allowNegativeCash?: boolean;
+  sameDayIncomeBeforeSameDayBills?: boolean;
+  roundingMode?: string;
+  optimizationGoal?: string;
+  payoffMode?: string;
+  housingPaymentMode?: string;
+  housingPayoffTargetMode?: string;
+  priorityOrder?: string;
 }
 
 export interface PlannerSnapshot {
@@ -212,6 +273,11 @@ export interface PlannerSnapshot {
   goals: SnapshotGoal[];
   cashAdjustments: SnapshotCashAdjustment[];
   settings: PlannerSettingsSnapshot;
+  deductionRules: SnapshotDeductionRule[];
+  categories: SnapshotUserCategory[];
+  labels: SnapshotCustomLabel[];
+  notificationSettings: NotificationSettingsSnapshot;
+  exportMetadata: ExportMetadataSnapshot;
 }
 
 export const PLANNER_SCHEMA_VERSION = "billpayer-shared-v1";

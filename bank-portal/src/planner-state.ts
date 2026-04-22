@@ -354,8 +354,7 @@ function normalizeNextPaycheck(
 export function normalizePlannerPlan(plan: PlannerPlan | null | undefined): PlannerPlan | null {
   if (!plan) return null;
   const p = plan as unknown as Record<string, unknown>;
-  const firstFailure =
-    normalizeFirstFailure(plan.firstFailure) ?? normalizeFirstFailure(p.first_failure) ?? plan.firstFailure ?? null;
+  const firstFailure = normalizeFirstFailure(plan.firstFailure ?? p.first_failure);
   const merged: PlannerPlan = {
     ...plan,
     dashboard: normalizeDashboard(plan.dashboard),

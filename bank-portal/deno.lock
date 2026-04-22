@@ -1,0 +1,17 @@
+{
+  "version": "5",
+  "remote": {
+    "https://esm.sh/@supabase/supabase-js@2.49.4": "d52c4d06946766d328fdd0ac2e007f52bb6d2ef7ce6103ad9f0f57d92b73e978"
+  },
+  "workspace": {
+    "packageJson": {
+      "dependencies": [
+        "npm:@supabase/supabase-js@^2.49.4",
+        "npm:@vitejs/plugin-legacy@^6.1.1",
+        "npm:terser@^5.46.1",
+        "npm:typescript@^5.8.3",
+        "npm:vite@^6.3.5"
+      ]
+    }
+  }
+}
