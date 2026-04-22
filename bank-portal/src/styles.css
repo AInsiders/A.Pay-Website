@@ -895,7 +895,7 @@ html::-webkit-scrollbar-thumb {
   .fx-nav-drawer.is-open {
     position: fixed !important;
     inset: 0 !important;
-    z-index: 1600 !important;
+    z-index: 50000 !important;
   }
 
   .fx-nav-drawer.is-open .fx-nav-drawer__backdrop {
@@ -907,7 +907,7 @@ html::-webkit-scrollbar-thumb {
   }
 
   .fx-nav-drawer.is-open .fx-nav-drawer__panel {
-    position: absolute !important;
+    position: fixed !important;
     top: 0;
     right: 0;
     bottom: 0;
@@ -925,6 +925,27 @@ html::-webkit-scrollbar-thumb {
 
   .fx-nav-drawer.is-open .fx-nav-drawer__extras {
     display: flex !important;
+  }
+}
+
+/* Touch-first override: even if a user zooms out and trips the 980px breakpoint,
+   keep the burger + drawer pattern on coarse pointers (phones/tablets). */
+@media (pointer: coarse) {
+  .fx-nav-toggle {
+    display: inline-flex !important;
+  }
+
+  .fx-nav-drawer {
+    position: fixed !important;
+    inset: 0 !important;
+    z-index: 50000 !important;
+    pointer-events: none;
+    visibility: hidden;
+  }
+
+  .fx-nav-drawer.is-open {
+    pointer-events: auto;
+    visibility: visible;
   }
 }
 
