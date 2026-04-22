@@ -1417,6 +1417,20 @@ body.fx-mobile-nav-open {
   overflow: hidden;
 }
 
+/*
+ * Mobile / tablet: the drawer DOM lives inside `.fx-header`, while route content is a later
+ * sibling in `.shell` — without a stacking hint, that content paints on top of the overlay.
+ * Lift the header (and open drawer) above the rest of the shell while the menu is open.
+ */
+body.fx-mobile-nav-open .fx-header {
+  position: relative;
+  z-index: 24000;
+}
+
+body.fx-mobile-nav-open .fx-nav-drawer.is-open {
+  z-index: 24001 !important;
+}
+
 .fx-brand {
   display: flex;
   align-items: center;

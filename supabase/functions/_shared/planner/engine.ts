@@ -390,8 +390,9 @@ function buildTimeline(
     const usable = p.usableAmount;
     const startingCash = cash;
     const allocated = allocations.reduce((s, a) => s + a.amount, 0);
-    const amountLeft = money(Math.max(0, usable - allocated));
-    cash = money(cash + amountLeft);
+    const opening = money(startingCash + usable);
+    cash = money(Math.max(0, opening - allocated));
+    const amountLeft = cash;
 
     timeline.push({
       date: toIsoDate(p.date),
