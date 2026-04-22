@@ -1441,7 +1441,7 @@ function renderPublicPage(route: RouteId) {
             <form id="form-contact" class="list">
               <label class="field">
                 Topic
-                <select name="topic" required>
+                <select class="fx-select" name="topic" required>
                   <option value="support">Support</option>
                   <option value="billing">Billing</option>
                   <option value="privacy">Privacy</option>
@@ -3099,6 +3099,29 @@ function renderEditorFooterButtons(busy: boolean, deletable: boolean): string {
   `;
 }
 
+function renderChoiceSegment(
+  fieldName: string,
+  legend: string,
+  current: string,
+  options: Array<{ value: string; label: string }>,
+): string {
+  const cur = options.some((o) => o.value === current) ? current : options[0]?.value ?? current;
+  return `
+    <div class="field field--choice">
+      <span class="field__legend">${escapeHtml(legend)}</span>
+      <input type="hidden" name="${escapeAttr(fieldName)}" value="${escapeAttr(cur)}" />
+      <div class="fx-seg fx-seg--wrap" role="radiogroup" aria-label="${escapeAttr(legend)}">
+        ${options
+          .map((o) => {
+            const active = o.value === cur;
+            return `<button type="button" class="fx-seg__btn${active ? " is-active" : ""}" data-choice-seg data-choice-field="${escapeAttr(fieldName)}" data-choice-value="${escapeAttr(o.value)}" role="radio" aria-checked="${active ? "true" : "false"}">${escapeHtml(o.label)}</button>`;
+          })
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
 function renderRecurringRuleFields(prefix: string, rule?: { type?: string; anchorDate?: string; dayOfMonth?: number; intervalDays?: number }): string {
   const r = rule ?? {};
   const opts: Array<{ value: string; label: string }> = [
@@ -3112,13 +3135,9 @@ function renderRecurringRuleFields(prefix: string, rule?: { type?: string; ancho
     { value: "YEARLY", label: "Every year" },
     { value: "EVERY_X_DAYS", label: "Every X days" },
   ];
+  const ruleType = r.type && opts.some((o) => o.value === r.type) ? r.type : "MONTHLY";
   return `
-    <div class="field">
-      <span style="font-weight:600">How often</span>
-      <select name="${prefix}_type">
-        ${opts.map((o) => `<option value="${o.value}"${r.type === o.value ? " selected" : ""}>${escapeHtml(o.label)}</option>`).join("")}
-      </select>
-    </div>
+    ${renderChoiceSegment(`${prefix}_type`, "How often", ruleType, opts)}
     <label class="field">Next date<input type="date" name="${prefix}_anchor" value="${escapeAttr(r.anchorDate ?? "")}" /></label>
     <label class="field">Day of the month (if monthly)<input type="number" name="${prefix}_dayOfMonth" min="1" max="31" placeholder="e.g. 15" value="${escapeAttr(r.dayOfMonth ?? "")}" /></label>
     <label class="field">Every how many days (if "Every X days")<input type="number" name="${prefix}_intervalDays" min="1" placeholder="e.g. 10" value="${escapeAttr(r.intervalDays ?? "")}" /></label>
@@ -3148,13 +3167,10 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
         <label class="field">Minimum due<input name="minimumDue" type="number" step="0.01" value="${escapeAttr(existing?.minimumDue ?? 0)}" /></label>
         <label class="field">Amount currently due<input name="currentAmountDue" type="number" step="0.01" value="${escapeAttr(existing?.currentAmountDue ?? 0)}" /></label>
         <label class="field">Category<input name="category" value="${escapeAttr(existing?.category ?? "")}" /></label>
-        <div class="field">
-          <span style="font-weight:600">Policy</span>
-          <select name="paymentPolicy">
-            <option value="HARD_DUE"${(existing?.paymentPolicy ?? "HARD_DUE") === "HARD_DUE" ? " selected" : ""}>Must pay on time (hard due date)</option>
-            <option value="FLEXIBLE_DUE"${existing?.paymentPolicy === "FLEXIBLE_DUE" ? " selected" : ""}>Flexible — can be delayed</option>
-          </select>
-        </div>
+        ${renderChoiceSegment("paymentPolicy", "Policy", existing?.paymentPolicy ?? "HARD_DUE", [
+          { value: "HARD_DUE", label: "On time" },
+          { value: "FLEXIBLE_DUE", label: "Flexible" },
+        ])}
         <label class="field"><input name="isEssential" type="checkbox"${existing?.isEssential ? " checked" : ""}/> Essential (never delay)</label>
         ${renderRecurringRuleFields("rule", existing?.recurringRule)}
       `;
@@ -3195,7 +3211,7 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
         <label class="field">Lender<input name="lender" value="${escapeAttr(existing?.lender ?? "")}" /></label>
         <div class="field">
           <span style="font-weight:600">Linked bank account (optional)</span>
-          <select name="bankAccountId">
+          <select class="fx-select" name="bankAccountId">
             <option value="">— none (enter balance manually below) —</option>
             ${accountOptions}
           </select>
@@ -3207,18 +3223,18 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
         <input type="hidden" name="currentBalanceFallback" value="${escapeAttr(existing?.currentBalance ?? 0)}" />
         <label class="field">Minimum payment<input name="minimumDue" type="number" step="0.01" value="${escapeAttr(existing?.minimumDue ?? 0)}" /></label>
         <label class="field">Next required due date<input name="requiredDueDate" type="date" value="${escapeAttr(existing?.requiredDueDate ?? "")}" /></label>
-        <div class="field">
-          <span style="font-weight:600">Type</span>
-          <select name="type">
-            ${[
-              { value: "INSTALLMENT", label: "Installment loan" },
-              { value: "REVOLVING", label: "Revolving balance" },
-              { value: "CREDIT_CARD", label: "Credit card" },
-              { value: "LOAN", label: "Loan" },
-              { value: "BORROW", label: "Borrowed money" },
-            ].map((t) => `<option value="${t.value}"${(existing?.type ?? "INSTALLMENT") === t.value ? " selected" : ""}>${escapeHtml(t.label)}</option>`).join("")}
-          </select>
-        </div>
+        ${renderChoiceSegment(
+          "type",
+          "Debt type",
+          existing?.type ?? "INSTALLMENT",
+          [
+            { value: "INSTALLMENT", label: "Installment" },
+            { value: "REVOLVING", label: "Revolving" },
+            { value: "CREDIT_CARD", label: "Card" },
+            { value: "LOAN", label: "Loan" },
+            { value: "BORROW", label: "Borrow" },
+          ],
+        )}
       `;
       break;
     }
@@ -3254,18 +3270,18 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
         <label class="field">Current monthly rent / mortgage<input name="currentMonthlyRent" type="number" step="0.01" required value="${escapeAttr(existing?.currentMonthlyRent ?? "")}" /></label>
         <label class="field">Minimum acceptable payment<input name="minimumAcceptablePayment" type="number" step="0.01" value="${escapeAttr(existing?.minimumAcceptablePayment ?? 0)}" /></label>
         <label class="field">Due day (1–31)<input name="rentDueDay" type="number" min="1" max="31" value="${escapeAttr(existing?.rentDueDay ?? 1)}" /></label>
-        <div class="field">
-          <span style="font-weight:600">Arrangement</span>
-          <select name="arrangement">
-            ${[
-              { value: "RENT_MONTH_TO_MONTH", label: "Rent — month to month" },
-              { value: "RENT_LEASE", label: "Rent — lease" },
-              { value: "MORTGAGE", label: "Mortgage" },
-              { value: "LAND_CONTRACT", label: "Land contract" },
-              { value: "OTHER", label: "Other" },
-            ].map((t) => `<option value="${t.value}"${(existing?.arrangement ?? "RENT_MONTH_TO_MONTH") === t.value ? " selected" : ""}>${escapeHtml(t.label)}</option>`).join("")}
-          </select>
-        </div>
+        ${renderChoiceSegment(
+          "arrangement",
+          "Arrangement",
+          existing?.arrangement ?? "RENT_MONTH_TO_MONTH",
+          [
+            { value: "RENT_MONTH_TO_MONTH", label: "Rent (monthly)" },
+            { value: "RENT_LEASE", label: "Rent (lease)" },
+            { value: "MORTGAGE", label: "Mortgage" },
+            { value: "LAND_CONTRACT", label: "Land contract" },
+            { value: "OTHER", label: "Other" },
+          ],
+        )}
       `;
       break;
     }
@@ -3275,30 +3291,21 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
       title = existing ? `Edit deduction — ${existing.name}` : "Add paycheck deduction";
       body = `
         <label class="field">Name<input name="name" required value="${escapeAttr(existing?.name ?? "")}" /></label>
-        <div class="field">
-          <span style="font-weight:600">Scope</span>
-          <select name="scope">
-            <option value="GLOBAL"${(existing?.scope ?? "GLOBAL") === "GLOBAL" ? " selected" : ""}>All paychecks</option>
-            <option value="INCOME_SOURCE"${existing?.scope === "INCOME_SOURCE" ? " selected" : ""}>One income source</option>
-          </select>
-        </div>
+        ${renderChoiceSegment("scope", "Applies to", existing?.scope ?? "GLOBAL", [
+          { value: "GLOBAL", label: "All paychecks" },
+          { value: "INCOME_SOURCE", label: "One income" },
+        ])}
         <label class="field">Income source id (if scoped)<input name="incomeSourceId" value="${escapeAttr(existing?.incomeSourceId ?? "")}" placeholder="UUID from Income list" /></label>
-        <div class="field">
-          <span style="font-weight:600">Value type</span>
-          <select name="valueType">
-            <option value="PERCENTAGE"${(existing?.valueType ?? "PERCENTAGE") === "PERCENTAGE" ? " selected" : ""}>Percent of gross</option>
-            <option value="FIXED_AMOUNT"${existing?.valueType === "FIXED_AMOUNT" ? " selected" : ""}>Fixed dollars</option>
-          </select>
-        </div>
+        ${renderChoiceSegment("valueType", "Value type", existing?.valueType ?? "PERCENTAGE", [
+          { value: "PERCENTAGE", label: "% of gross" },
+          { value: "FIXED_AMOUNT", label: "Fixed $" },
+        ])}
         <label class="field">Percentage (0–1 if decimal, or use whole e.g. 0.15 for 15%)<input name="percentage" type="number" step="0.0001" value="${escapeAttr(existing?.percentage ?? 0)}" /></label>
         <label class="field">Fixed amount<input name="fixedAmount" type="number" step="0.01" value="${escapeAttr(existing?.fixedAmount ?? 0)}" /></label>
-        <div class="field">
-          <span style="font-weight:600">Status</span>
-          <select name="status">
-            <option value="MANDATORY"${(existing?.status ?? "MANDATORY") === "MANDATORY" ? " selected" : ""}>Mandatory</option>
-            <option value="OPTIONAL"${existing?.status === "OPTIONAL" ? " selected" : ""}>Optional</option>
-          </select>
-        </div>
+        ${renderChoiceSegment("status", "Status", existing?.status ?? "MANDATORY", [
+          { value: "MANDATORY", label: "Mandatory" },
+          { value: "OPTIONAL", label: "Optional" },
+        ])}
         <label class="field"><input name="isEnabledByDefault" type="checkbox"${existing?.isEnabledByDefault !== false ? " checked" : ""}/> Enabled by default</label>
         <label class="field">Notes<input name="notes" value="${escapeAttr(existing?.notes ?? "")}" /></label>
       `;
@@ -3333,33 +3340,46 @@ function renderSettingsEditorOverlay(snap: PlannerSnapshot | null): string {
         <label class="field">Safety floor — minimum cash to keep<input name="safetyFloorCash" type="number" step="0.01" value="${escapeAttr(s.safetyFloorCash ?? 0)}" /></label>
         <label class="field">Horizon days<input name="horizonDays" type="number" min="30" max="365" value="${escapeAttr(s.horizonDays ?? 120)}" /></label>
         <label class="field">Reserve near-future window (days)<input name="reserveNearFutureWindowDays" type="number" min="1" max="60" value="${escapeAttr(s.reserveNearFutureWindowDays ?? 21)}" /></label>
-        <div class="field">
-          <span style="font-weight:600">Scenario mode</span>
-          <select name="selectedScenarioMode">
-            ${[
-              { value: "FIXED", label: "Use typical paycheck amount" },
-              { value: "LOWEST_INCOME", label: "Plan for low paychecks" },
-              { value: "MOST_EFFICIENT", label: "Balanced" },
-              { value: "HIGHEST_INCOME", label: "Plan for high paychecks" },
-            ].map((m) => `<option value="${m.value}"${s.selectedScenarioMode === m.value ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("")}
-          </select>
-        </div>
-        <div class="field">
-          <span style="font-weight:600">Planning style</span>
-          <select name="planningStyle">
-            ${["BALANCED", "SURVIVAL", "AGGRESSIVE_SAVE"].map((ps) =>
-              `<option value="${ps}"${(s.planningStyle ?? "BALANCED") === ps ? " selected" : ""}>${escapeHtml(ps)}</option>`,
-            ).join("")}
-          </select>
-        </div>
+        ${renderChoiceSegment("selectedScenarioMode", "Scenario mode", s.selectedScenarioMode ?? "FIXED", [
+          { value: "FIXED", label: "Typical pay" },
+          { value: "LOWEST_INCOME", label: "Low pay" },
+          { value: "MOST_EFFICIENT", label: "Balanced" },
+          { value: "HIGHEST_INCOME", label: "High pay" },
+        ])}
+        ${renderChoiceSegment("planningStyle", "Planning style", s.planningStyle ?? "BALANCED", [
+          { value: "BALANCED", label: "Balanced" },
+          { value: "SURVIVAL", label: "Survival" },
+          { value: "AGGRESSIVE_SAVE", label: "Save harder" },
+        ])}
+        ${renderChoiceSegment("optimizationGoal", "Optimization goal", s.optimizationGoal ?? "BALANCED", [
+          { value: "STAY_CURRENT", label: "Stay current" },
+          { value: "CATCH_UP_FAST", label: "Catch up" },
+          { value: "PAY_DEBT_FAST", label: "Pay debt" },
+          { value: "MINIMIZE_BORROWING", label: "Less borrowing" },
+          { value: "BALANCED", label: "Balanced" },
+        ])}
+        ${renderChoiceSegment("payoffMode", "Debt payoff order", s.payoffMode ?? "SNOWBALL", [
+          { value: "SNOWBALL", label: "Smallest first" },
+          { value: "AVALANCHE", label: "Highest APR" },
+          { value: "CUSTOM", label: "Custom order" },
+        ])}
+        ${renderChoiceSegment("housingPaymentMode", "Housing payment", s.housingPaymentMode ?? "MINIMUM_CURRENT", [
+          { value: "MINIMUM_CURRENT", label: "Minimum due" },
+          { value: "FULL_CURRENT", label: "Full amount" },
+        ])}
+        ${renderChoiceSegment(
+          "housingPayoffTargetMode",
+          "Housing in debt payoff",
+          s.housingPayoffTargetMode ?? "REGULAR_DEBTS_ONLY",
+          [
+            { value: "REGULAR_DEBTS_ONLY", label: "Debts only" },
+            { value: "INCLUDE_HOUSING_ARREARS", label: "Include arrears" },
+          ],
+        )}
         <label class="field">Currency (ISO)<input name="currency" value="${escapeAttr(s.currency ?? "USD")}" /></label>
         <label class="field">IANA timezone<input name="timezone" value="${escapeAttr(s.timezone ?? "UTC")}" placeholder="America/Chicago" /></label>
         <label class="field fx-checkbox"><input name="allowNegativeCash" type="checkbox"${s.allowNegativeCash ? " checked" : ""}/> Allow plan to go negative (advanced)</label>
         <label class="field fx-checkbox"><input name="sameDayIncomeBeforeSameDayBills" type="checkbox"${(s.sameDayIncomeBeforeSameDayBills ?? true) ? " checked" : ""}/> Same day: income before bills</label>
-        <label class="field">Optimization goal<input name="optimizationGoal" value="${escapeAttr(s.optimizationGoal ?? "BALANCED")}" placeholder="BALANCED" /></label>
-        <label class="field">Payoff mode<input name="payoffMode" value="${escapeAttr(s.payoffMode ?? "SNOWBALL")}" placeholder="SNOWBALL" /></label>
-        <label class="field">Housing payment mode<input name="housingPaymentMode" value="${escapeAttr(s.housingPaymentMode ?? "MINIMUM_CURRENT")}" /></label>
-        <label class="field">Housing payoff target mode<input name="housingPayoffTargetMode" value="${escapeAttr(s.housingPayoffTargetMode ?? "REGULAR_DEBTS_ONLY")}" /></label>
         <label class="field">Engine priority order (comma-separated)<input name="priorityOrder" value="${escapeAttr(s.priorityOrder ?? "")}" placeholder="ESSENTIALS,OVERDUE_ITEMS,..." /></label>
       `;
       break;
@@ -3624,7 +3644,7 @@ function renderSplitRow(
     <div class="fx-splits__row" data-split-id="${escapeAttr(row.id)}">
       <label class="field">
         <span style="font-weight:600">${index === 0 ? "Category" : `Category ${index + 1}`}</span>
-        <select data-split-field="target">${categoryOptions}</select>
+        <select class="fx-select" data-split-field="target">${categoryOptions}</select>
       </label>
       <label class="field">
         <span style="font-weight:600">Amount</span>
@@ -4648,6 +4668,22 @@ function wireSettingsEditorButtons() {
 
   const editorForm = document.querySelector<HTMLFormElement>("#form-settings-editor");
   if (editorForm) {
+    editorForm.addEventListener("click", (e) => {
+      const btn = (e.target as HTMLElement | null)?.closest<HTMLButtonElement>("button[data-choice-seg]");
+      if (!btn || !editorForm.contains(btn)) return;
+      const field = btn.getAttribute("data-choice-field");
+      const val = btn.getAttribute("data-choice-value") ?? "";
+      if (!field) return;
+      const hidden = editorForm.querySelector<HTMLInputElement>(`input[type="hidden"][name="${field}"]`);
+      if (!hidden) return;
+      hidden.value = val;
+      const group = btn.closest(".fx-seg");
+      group?.querySelectorAll<HTMLButtonElement>("button[data-choice-seg]").forEach((b) => {
+        const on = b === btn;
+        b.classList.toggle("is-active", on);
+        b.setAttribute("aria-checked", on ? "true" : "false");
+      });
+    });
     editorForm.addEventListener("submit", (e) => {
       e.preventDefault();
       void submitSettingsEditor(editorForm);

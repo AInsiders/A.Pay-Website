@@ -94,7 +94,13 @@ interface SnapshotHousingBucket { id: string; label: string; monthKey: string; a
 interface SnapshotHousingPayment { id: string; bucketId: string; amount: number; paymentDate: string }
 interface SnapshotGoal { id: string; name: string; targetAmount: number; currentAmount: number; isActive?: boolean }
 interface SnapshotCashAdjustment { id: string; accountId?: string | null; type: string; amount: number; adjustmentDate: string }
-interface PlannerSettings { targetBuffer?: number; selectedScenarioMode?: PlannerScenarioMode; planningStyle?: string; horizonDays?: number }
+interface PlannerSettings {
+  targetBuffer?: number;
+  safetyFloorCash?: number;
+  selectedScenarioMode?: PlannerScenarioMode;
+  planningStyle?: string;
+  horizonDays?: number;
+}
 interface PlannerSnapshot {
   today: string;
   accounts: SnapshotAccount[];
@@ -671,7 +677,7 @@ function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
   const horizonDays = snapshot.settings.horizonDays ?? DEFAULT_HORIZON_DAYS;
   const horizon = addDays(today, horizonDays);
   const mode: PlannerScenarioMode = snapshot.settings.selectedScenarioMode ?? "FIXED";
-  const safetyFloor = snapshot.settings.targetBuffer ?? 0;
+  const spendingSafetyGate = Math.max(snapshot.settings.targetBuffer ?? 0, snapshot.settings.safetyFloorCash ?? 0);
 
   const paychecks = forecastPaychecks(snapshot, mode, today, horizon);
   const obligations = [
@@ -707,10 +713,10 @@ function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
   );
   const requiredCashNow = money(essentialsDueForCurrentInterval + hardDueBeforeNextIncome + crossPaycheckReserveTotal);
 
-  const safeToSpendNow = Math.max(0, money(cash - requiredCashNow - safetyFloor));
-  const amountShort = Math.max(0, money(requiredCashNow + safetyFloor - cash));
+  const safeToSpendNow = Math.max(0, money(cash - requiredCashNow - spendingSafetyGate));
+  const amountShort = Math.max(0, money(requiredCashNow + spendingSafetyGate - cash));
   const safeToSpendAfterNextDeposit = nextPaycheck
-    ? Math.max(0, money(cash + nextPaycheck.usableAmount - requiredCashNow - safetyFloor))
+    ? Math.max(0, money(cash + nextPaycheck.usableAmount - requiredCashNow - spendingSafetyGate))
     : safeToSpendNow;
 
   const nextPayDate = nextPaycheck?.date ?? null;
@@ -883,7 +889,7 @@ function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
     const ps = forecastPaychecks(snapshot, m, today, horizon);
     const np = ps[0];
     const eligible = money(cash + (np?.usableAmount ?? 0));
-    return money(eligible - requiredCashNow - safetyFloor);
+    return money(eligible - requiredCashNow - spendingSafetyGate);
   };
 
   const scenarioSummaries: PlannerScenarioSummary[] =
@@ -978,7 +984,7 @@ function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
     availableScenarioModes: ["FIXED", "LOWEST_INCOME", "MOST_EFFICIENT", "HIGHEST_INCOME"],
     scenarioSummaries,
     catchUpAnalytics,
-    safeExtraPayoffAmount: Math.max(0, money(safeToSpendNow - safetyFloor)),
+    safeExtraPayoffAmount: Math.max(0, money(safeToSpendNow - spendingSafetyGate)),
     safeToSpendNow,
     safeLiquidityNow: Math.max(0, money(cash - hardDueBeforeNextIncome)),
     protectedAmount: requiredCashNow,

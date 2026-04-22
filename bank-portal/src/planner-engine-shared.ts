@@ -8,6 +8,10 @@
 //
 // Keep in sync with supabase/functions/planner-recompute/index.ts when changing
 // planner behavior so the web preview and any server-side recompute stay consistent.
+//
+// The Android app uses `CashflowPlanner` (Kotlin) for authoritative planning; this TS engine
+// is a lighter checkpoint model. Safe-to-spend buffer uses `max(targetBuffer, safetyFloorCash)`
+// to match the app's spending gate (see `calculateSafeToSpendNow`).
 
 import type {
   PlannerAllocationLine,
@@ -889,7 +893,8 @@ export function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
   const horizonDays = snapshot.settings.horizonDays ?? DEFAULT_HORIZON_DAYS;
   const horizon = addDays(today, horizonDays);
   const mode: PlannerScenarioMode = snapshot.settings.selectedScenarioMode ?? "FIXED";
-  const safetyFloor = snapshot.settings.targetBuffer ?? 0;
+  /** Matches Android `CashflowPlanner.calculateSafeToSpendNow` gate: `max(targetBuffer, safetyFloorCash)`. */
+  const spendingSafetyGate = Math.max(snapshot.settings.targetBuffer ?? 0, snapshot.settings.safetyFloorCash ?? 0);
 
   const paychecks = forecastPaychecks(snapshot, mode, today, horizon);
   const obligations = [
@@ -926,10 +931,10 @@ export function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
   );
   const requiredCashNow = money(essentialsDueForCurrentInterval + hardDueBeforeNextIncome + crossPaycheckReserveTotal);
 
-  const safeToSpendNow = Math.max(0, money(cash - requiredCashNow - safetyFloor));
-  const amountShort = Math.max(0, money(requiredCashNow + safetyFloor - cash));
+  const safeToSpendNow = Math.max(0, money(cash - requiredCashNow - spendingSafetyGate));
+  const amountShort = Math.max(0, money(requiredCashNow + spendingSafetyGate - cash));
   const safeToSpendAfterNextDeposit = nextPaycheck
-    ? Math.max(0, money(cash + nextPaycheck.usableAmount - requiredCashNow - safetyFloor))
+    ? Math.max(0, money(cash + nextPaycheck.usableAmount - requiredCashNow - spendingSafetyGate))
     : safeToSpendNow;
 
   const nextPayDate = nextPaycheck?.date ?? null;
@@ -1103,7 +1108,7 @@ export function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
     const ps = forecastPaychecks(snapshot, m, today, horizon);
     const np = ps[0];
     const eligible = money(cash + (np?.usableAmount ?? 0));
-    return money(eligible - requiredCashNow - safetyFloor);
+    return money(eligible - requiredCashNow - spendingSafetyGate);
   };
 
   const scenarioSummaries: PlannerScenarioSummary[] =
@@ -1198,7 +1203,7 @@ export function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
     availableScenarioModes: ["FIXED", "LOWEST_INCOME", "MOST_EFFICIENT", "HIGHEST_INCOME"],
     scenarioSummaries,
     catchUpAnalytics,
-    safeExtraPayoffAmount: Math.max(0, money(safeToSpendNow - safetyFloor)),
+    safeExtraPayoffAmount: Math.max(0, money(safeToSpendNow - spendingSafetyGate)),
     safeToSpendNow,
     safeLiquidityNow: Math.max(0, money(cash - hardDueBeforeNextIncome)),
     protectedAmount: requiredCashNow,
