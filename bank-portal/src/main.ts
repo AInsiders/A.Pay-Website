@@ -82,7 +82,6 @@ type SettingsGroupId = "setup" | "planning" | "app" | "data";
 
 type SettingsLeafId =
   | "accounts"
-  | "bank-linking"
   | "income"
   | "bills"
   | "expenses"
@@ -127,7 +126,7 @@ const SETTINGS_GROUP_META: Record<SettingsGroupId, { title: string; subtitle: st
 };
 
 const SETTINGS_LEAVES: Record<SettingsGroupId, SettingsLeafId[]> = {
-  setup: ["accounts", "bank-linking", "income", "bills", "expenses", "debts", "housing"],
+  setup: ["accounts", "income", "bills", "expenses", "debts", "housing"],
   planning: ["goals", "paycheck-rules", "planner-preferences"],
   app: ["profile", "organization", "notifications"],
   data: ["backup"],
@@ -140,13 +139,8 @@ const SETTINGS_LEAF_META: Record<
   accounts: {
     title: "Accounts",
     subtitle: "Cash, bank, wallet, and balances",
-    description: "Balances feed cash available, deposit routing, and every live plan update.",
-    openAccounts: true,
-  },
-  "bank-linking": {
-    title: "Bank linking",
-    subtitle: "Teller Connect",
-    description: "Connect financial institutions so balances and transactions sync in.",
+    description:
+      "Manual balances and Teller bank linking (same flow as the Accounts tab) feed cash available, deposit routing, and every live plan update.",
     openAccounts: true,
   },
   income: {
@@ -226,6 +220,9 @@ function parseSettingsNav(hash: string): SettingsNav {
   if (!isSettingsGroupId(g)) return { tier: "home" };
   if (seg.length === 1) return { tier: "group", group: g };
   const leafSlug = seg[1]!;
+  if (leafSlug === "bank-linking") {
+    return { tier: "leaf", group: "setup", leaf: "accounts" };
+  }
   const allowed = SETTINGS_LEAVES[g];
   const leaf = allowed.find((l) => l === leafSlug);
   if (!leaf) return { tier: "group", group: g };
@@ -511,8 +508,6 @@ interface TransactionAssignmentSummary {
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
-/** Cleans pointer/scroll listeners when leaving the guest landing view. */
-let landingParallaxTeardown: (() => void) | null = null;
 
 const DEFAULT_ACCENT = "#12C8FF";
 
@@ -1389,14 +1384,11 @@ function renderBoot() {
   `;
 }
 
-/** Hero: stacks of cash / liquidity mood (Unsplash). */
-const LANDING_HERO_IMG =
-  "https://images.unsplash.com/photo-1530651788726-238dfa2d8d5c?auto=format&fit=crop&w=1920&q=85";
-
-function navLink(route: RouteId, label: string, current: RouteId) {
+/** Guest top nav — same chrome classes as the signed-in app for visual consistency. */
+function guestNavLink(route: RouteId, label: string, current: RouteId) {
   const href = route === "home" ? "#/" : `#/${route}`;
   const active = route === current ? " is-active" : "";
-  return `<a class="fx-nav__link${active}" href="${href}" data-nav="${route}">${escapeHtml(label)}</a>`;
+  return `<a class="fx-app-nav__link${active}" href="${href}" data-nav="${route}">${escapeHtml(label)}</a>`;
 }
 
 function renderPublicPage(route: RouteId) {
@@ -1492,76 +1484,51 @@ function renderPublicPage(route: RouteId) {
     case "home":
     default:
       return `
-        <div class="fx-hero-parallax-wrap" id="hero-parallax-scope" aria-label="A.Pay home">
-          <section class="fx-hero-pro fx-hero-pro--fullscreen" aria-labelledby="landing-hero-title">
-            <div class="fx-hero-pro__media">
-              <div class="fx-hero-pro__parallax-inner fx-parallax-bg">
-                <img
-                  class="fx-hero-pro__img"
-                  src="${LANDING_HERO_IMG}"
-                  width="1920"
-                  height="1080"
-                  alt="US hundred-dollar bills—liquid cash, financial freedom energy"
-                  decoding="async"
-                  fetchpriority="high"
-                />
-              </div>
+        <div class="fx-stack">
+          <section class="fx-app-hero fx-panel fx-panel--highlight" aria-labelledby="guest-home-title">
+            <div>
+              <p class="fx-eyebrow">Home</p>
+              <h1 id="guest-home-title">Safe to spend</h1>
+              <p class="fx-app-hero__value fx-app-hero__value--guest">Sign in to see yours</p>
+              <p class="muted">
+                A.Pay maps each paycheck to bills and essentials, holds cross-paycheck reserves, and keeps one honest “safe to spend”
+                number up front—the same Home view you get after sign-in.
+              </p>
             </div>
-            <div class="fx-hero-pro__overlay"></div>
-
-            <div class="fx-hero-pro__body">
-              <div class="fx-hero-pro__content shell-narrow fx-parallax-hero-copy">
-                <p class="fx-hero-pro__eyebrow">Bill dread off · liquidity on</p>
-                <h1 id="landing-hero-title" class="fx-hero-pro__title">
-                  Built for the vibe of <span class="fx-hero-pro__accent">all cash, no panic</span>
-                </h1>
-                <p class="fx-hero-pro__lede">
-                  See what’s already handled automatically, then treat the rest like money in your pocket—forecast paydays,
-                  link your bank with Teller, and spend knowing exactly what’s still truly yours.
-                </p>
-                <div class="fx-hero-pro__actions">
-                  <button type="button" class="fx-btn-hero" id="btn-hero-cta">Start stacking clarity</button>
-                  <button type="button" class="fx-btn-hero-secondary js-open-auth">I already have an account</button>
-                </div>
-                <ul class="fx-hero-pro__trust" aria-label="Highlights">
-                  <li>Liquid cash, spelled out</li>
-                  <li>Real balances via Teller</li>
-                  <li>Spend loud, not blind</li>
-                </ul>
-              </div>
+            <div class="fx-app-hero__meta">
+              <span>Forecast: <strong>paycheck to paycheck</strong></span>
+              <span>Bank sync: <strong>Teller</strong></span>
+            </div>
+            <div class="fx-scenario-strip" aria-label="Highlights">
+              <span class="fx-scenario-pill">Liquid cash, spelled out</span>
+              <span class="fx-scenario-pill">Bills before “extra”</span>
+              <span class="fx-scenario-pill">Live safe-to-spend</span>
+            </div>
+            <div class="row" style="flex-wrap:wrap;gap:10px;margin-top:6px">
+              <button type="button" id="btn-hero-cta">Create account or sign in</button>
+              <button type="button" class="secondary js-open-auth">I already have an account</button>
             </div>
           </section>
-        </div>
 
-        <section class="fx-value-section shell-narrow" aria-labelledby="value-heading">
-          <h2 id="value-heading" class="fx-value-section__title">Why cash-conscious households use A.Pay</h2>
-          <p class="fx-value-section__subtitle">
-            Most apps leave you staring at history. A.Pay shows what stays liquid after life auto-pays itself—so you move through paydays with swagger, not spreadsheet shame.
-          </p>
-          <div class="fx-value-grid">
-            <article class="fx-value-card">
-              <span class="fx-value-card__icon" aria-hidden="true">01</span>
-              <h3 class="fx-value-card__h">Forecast across paydays</h3>
-              <p class="fx-value-card__p">
-                Map income across upcoming paydays—liquidity first, not just today’s balance—so shortfalls surface before they sting.
-              </p>
-            </article>
-            <article class="fx-value-card">
-              <span class="fx-value-card__icon" aria-hidden="true">02</span>
-              <h3 class="fx-value-card__h">Know what’s safe to spend</h3>
-              <p class="fx-value-card__p">
-                See what’s already earmarked for life’s non-negotiables, then spend what’s left without the guilt—or the overdraft surprise.
-              </p>
-            </article>
-            <article class="fx-value-card">
-              <span class="fx-value-card__icon" aria-hidden="true">03</span>
-              <h3 class="fx-value-card__h">Real bank data, one glass pane</h3>
-              <p class="fx-value-card__p">
-                Connect accounts with Teller and watch deposits and debits roll in. Your forecast stays honest because your numbers stay current.
-              </p>
-            </article>
+          <div class="fx-metric-grid" aria-labelledby="guest-value-heading">
+            <h2 id="guest-value-heading" class="visually-hidden">Why households use A.Pay</h2>
+            <section class="fx-metric-card" aria-labelledby="guest-m1">
+              <p class="fx-metric-card__label" id="guest-m1">Forecast</p>
+              <strong>Across paydays</strong>
+              <p>Map income to upcoming bills so shortfalls show up before they sting—not just today’s balance.</p>
+            </section>
+            <section class="fx-metric-card" aria-labelledby="guest-m2">
+              <p class="fx-metric-card__label" id="guest-m2">Clarity</p>
+              <strong>Safe to spend</strong>
+              <p>See what is already earmarked for essentials, then spend what is left without guesswork.</p>
+            </section>
+            <section class="fx-metric-card" aria-labelledby="guest-m3">
+              <p class="fx-metric-card__label" id="guest-m3">Sync</p>
+              <strong>Real balances</strong>
+              <p>Connect with Teller so deposits and debits keep the plan honest over time.</p>
+            </section>
           </div>
-        </section>
+        </div>
       `;
   }
 }
@@ -1576,36 +1543,50 @@ function renderAuth() {
   })();
   const disabled = state.busy || !isSupabaseConfigured;
   const route = state.route;
-  const nav = `
-    <nav class="fx-nav" aria-label="Primary">
-      ${navLink("home", "Home", route)}
-      ${navLink("about", "About", route)}
-      ${navLink("contact", "Contact", route)}
-      ${navLink("privacy", "Privacy", route)}
-      ${navLink("terms", "Terms", route)}
+  const guestNav = `
+    <nav class="fx-app-nav" aria-label="Site">
+      ${guestNavLink("home", "Home", route)}
+      ${guestNavLink("about", "About", route)}
+      ${guestNavLink("contact", "Contact", route)}
+      ${guestNavLink("privacy", "Privacy", route)}
+      ${guestNavLink("terms", "Terms", route)}
     </nav>
   `;
   return `
-    <div class="fx-root fx-root--landing">
+    <div class="fx-root">
       <div class="fx-grid" aria-hidden="true"></div>
       <div class="fx-scan" aria-hidden="true"></div>
       <div class="fx-noise" aria-hidden="true"></div>
 
-      <header class="fx-landing-header" role="banner">
-        <div class="fx-landing-header__inner shell-narrow">
+      <div class="shell">
+        <header class="fx-header" role="banner">
           <div class="fx-brand">
             <div class="fx-brand__mark" aria-hidden="true"></div>
             <div class="fx-brand__text">
               <span class="fx-brand__name">A.Pay</span>
-              <span class="fx-brand__tag">Cash-first clarity</span>
+              <span class="fx-brand__tag">Forecast &amp; cash</span>
             </div>
           </div>
-          ${nav}
-          <button type="button" class="fx-landing-header__link" id="btn-open-auth">Sign in</button>
-        </div>
-      </header>
+          ${guestNav}
+          <div class="fx-header__actions">
+            <button type="button" id="btn-open-auth">Sign in</button>
+          </div>
+        </header>
 
-      ${renderPublicPage(route)}
+        ${
+          !isSupabaseConfigured
+            ? `<div class="banner">A.Pay is in preview mode. Sign-in and bank linking are unavailable until the server is connected.</div>`
+            : ""
+        }
+        ${state.error ? `<div class="banner banner--alert" role="alert">${escapeHtml(state.error)}</div>` : ""}
+        ${renderPublicPage(route)}
+
+        <footer class="fx-app-footer">
+          <a href="#/privacy">Privacy</a>
+          <a href="#/terms">Terms</a>
+          <span>© ${new Date().getFullYear()} A.Pay</span>
+        </footer>
+      </div>
 
       <div
         class="fx-auth-modal${state.authModalOpen ? " fx-auth-modal--open" : ""}"
@@ -1663,16 +1644,6 @@ function renderAuth() {
           }
         </div>
       </div>
-
-      <footer class="fx-landing-footer" role="contentinfo">
-        <div class="fx-landing-footer__inner shell-narrow">
-          <p class="fx-landing-footer__copy">© ${new Date().getFullYear()} A.Insiders Network. All rights reserved.</p>
-          <div class="fx-landing-footer__links" aria-label="Legal">
-            <a href="#/privacy">Privacy</a>
-            <a href="#/terms">Terms</a>
-          </div>
-        </div>
-      </footer>
 
     </div>
   `;
@@ -2078,7 +2049,8 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
   const overdueList = dash?.overdueNow ?? [];
   const dueTodayList = dash?.dueToday ?? [];
   const nextPaycheck = plan.nextPaycheckNeed;
-  const paychecks = (plan.timeline ?? []).slice(0, 6);
+  const paychecks = plan.timeline ?? [];
+  const horizonDays = state.normalizedSnapshot?.settings?.horizonDays ?? 120;
 
   return `
     <div class="fx-planner">
@@ -2128,10 +2100,10 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
             <p class="fx-eyebrow">Paycheck-to-paycheck</p>
             <h2>Each paycheck — what it covers</h2>
           </div>
-          <p class="muted">Auto-allocated using your bills, expenses, debts, and housing.</p>
+          <p class="muted">Full plan through your <strong>${horizonDays}-day</strong> horizon (${paychecks.length} pay cycle${paychecks.length === 1 ? "" : "s"}), oldest → newest. Recomputes when you refresh or change income, bills, or balances.</p>
         </header>
         ${paychecks.length > 0
-          ? `<div class="fx-paycheck-rail">${paychecks.map(renderPaycheckCard).join("")}</div>`
+          ? `<div class="fx-paycheck-rail">${paychecks.map((p, i) => renderPaycheckCard(p, i + 1, paychecks.length)).join("")}</div>`
           : `<p class="muted">No upcoming paychecks yet. Add a paycheck in Settings.</p>`}
       </section>
 
@@ -2399,7 +2371,11 @@ function bucketLabel(bucket?: string): string {
   }
 }
 
-function renderPaycheckCard(p: import("./planner-state").PlannerTimelinePaycheckPlan): string {
+function renderPaycheckCard(
+  p: import("./planner-state").PlannerTimelinePaycheckPlan,
+  step?: number,
+  total?: number,
+): string {
   const allocations = p.allocations ?? [];
   const grouped = new Map<string, { total: number; lines: { label: string; amount: number }[] }>();
   for (const a of allocations) {
@@ -2475,6 +2451,7 @@ function renderPaycheckCard(p: import("./planner-state").PlannerTimelinePaycheck
         <div>
           <span class="fx-paycheck__date">${escapeHtml(paycheckDateLabel(p.date) || p.date || "")}</span>
           <strong class="fx-paycheck__label">${escapeHtml(p.payerLabel ?? "Paycheck")}</strong>
+          ${step != null && total != null ? `<span class="fx-paycheck__step">Pay cycle ${step} of ${total}</span>` : ""}
         </div>
         <div class="fx-paycheck__in">
           <span class="muted">Usable pay</span>
@@ -2890,7 +2867,6 @@ function renderSettingsLeafInner(snap: PlannerSnapshot, leaf: SettingsLeafId): s
   `;
   switch (leaf) {
     case "accounts":
-    case "bank-linking":
       return openAccountsCta;
     case "income":
       return renderCrudListSection({
@@ -3735,9 +3711,6 @@ function renderCategorizeOverlay(snap: PlannerSnapshot | null): string {
 }
 
 function render() {
-  landingParallaxTeardown?.();
-  landingParallaxTeardown = null;
-
   state.route = readRouteFromHash();
 
   if (!state.session && APP_ONLY_ROUTES.has(state.route)) {
@@ -3776,70 +3749,7 @@ function closeAuthModal() {
   render();
 }
 
-/** Pointer-driven parallax: background moves slowly; nav + glass move faster (layered depth). */
-function bindLandingParallax() {
-  landingParallaxTeardown?.();
-  landingParallaxTeardown = null;
-
-  const root = document.getElementById("hero-parallax-scope");
-  if (!root) return;
-
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    root.style.setProperty("--prlx-x", "0");
-    root.style.setProperty("--prlx-y", "0");
-    root.style.setProperty("--prlx-scroll", "0");
-    return;
-  }
-
-  let raf = 0;
-  let mx = 0;
-  let my = 0;
-
-  const flush = () => {
-    raf = 0;
-    root.style.setProperty("--prlx-x", mx.toFixed(5));
-    root.style.setProperty("--prlx-y", my.toFixed(5));
-  };
-
-  const setFromClient = (clientX: number, clientY: number) => {
-    const rect = root.getBoundingClientRect();
-    const w = Math.max(rect.width, 1);
-    const h = Math.max(rect.height, 1);
-    mx = ((clientX - rect.left) / w - 0.5) * 2;
-    my = ((clientY - rect.top) / h - 0.5) * 2;
-    if (!raf) raf = requestAnimationFrame(flush);
-  };
-
-  const onMove = (e: MouseEvent) => setFromClient(e.clientX, e.clientY);
-
-  const onTouch = (e: TouchEvent) => {
-    if (e.touches.length !== 1) return;
-    const t = e.touches[0];
-    setFromClient(t.clientX, t.clientY);
-  };
-
-  const onScroll = () => {
-    const rect = root.getBoundingClientRect();
-    const total = Math.max(rect.height, 1);
-    const past = Math.min(1, Math.max(0, -rect.top / total));
-    root.style.setProperty("--prlx-scroll", past.toFixed(5));
-  };
-
-  root.addEventListener("mousemove", onMove);
-  root.addEventListener("touchmove", onTouch, { passive: true });
-  window.addEventListener("scroll", onScroll, { passive: true });
-  onScroll();
-
-  landingParallaxTeardown = () => {
-    root.removeEventListener("mousemove", onMove);
-    root.removeEventListener("touchmove", onTouch);
-    window.removeEventListener("scroll", onScroll);
-  };
-}
-
 function wireAuth() {
-  if (state.route === "home") bindLandingParallax();
-
   document.getElementById("btn-hero-cta")?.addEventListener("click", () => openAuthModal());
   document.getElementById("btn-open-auth")?.addEventListener("click", () => openAuthModal());
   document.querySelectorAll<HTMLElement>(".js-open-auth").forEach((el) => {
