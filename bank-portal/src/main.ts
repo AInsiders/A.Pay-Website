@@ -3823,11 +3823,8 @@ function setMobileNavOpen(open: boolean) {
   if (!drawer || !toggle) return;
   drawer.classList.toggle("is-open", open);
   toggle.setAttribute("aria-expanded", open ? "true" : "false");
-  if (window.matchMedia("(max-width: 979px)").matches) {
-    document.body.classList.toggle("fx-mobile-nav-open", open);
-  } else {
-    document.body.classList.remove("fx-mobile-nav-open");
-  }
+  toggle.setAttribute("aria-label", open ? "Close menu" : "Open menu");
+  document.body.classList.toggle("fx-mobile-nav-open", open);
 }
 
 function wireMobileNav() {
@@ -3848,10 +3845,6 @@ function wireMobileNav() {
     close();
     openAuthModal();
   });
-  const onResize = () => {
-    if (window.matchMedia("(min-width: 980px)").matches) close();
-  };
-  window.addEventListener("resize", onResize);
 }
 
 function wireAuth() {
