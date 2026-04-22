@@ -137,8 +137,8 @@ const SETTINGS_LEAF_META: Record<
   { title: string; subtitle: string; description: string; openAccounts?: boolean }
 > = {
   accounts: {
-    title: "Accounts",
-    subtitle: "Cash, bank, wallet, and balances",
+    title: "Accounts & banking",
+    subtitle: "Balances + linked bank activity",
     description:
       "Manual balances and Teller bank linking (same flow as the Accounts tab) feed cash available, deposit routing, and every live plan update.",
     openAccounts: true,
@@ -258,9 +258,9 @@ const PLANNER_SNAPSHOT_SELECT =
 
 const CORE_SETUP_OPTIONS: WebSetupOption[] = [
   {
-    title: "Accounts",
-    subtitle: "Your cash, checking, and savings",
-    description: "What you actually have available right now.",
+    title: "Accounts & banking",
+    subtitle: "Balances + linked bank activity",
+    description: "Your cash on hand, plus any connected bank accounts.",
   },
   {
     title: "Paychecks",
