@@ -773,6 +773,8 @@ html::-webkit-scrollbar-thumb {
   top: 0;
   right: 0;
   bottom: 0;
+  height: 100dvh;
+  max-height: 100dvh;
   width: min(300px, 88vw);
   display: flex;
   flex-direction: column;
@@ -795,6 +797,10 @@ html::-webkit-scrollbar-thumb {
   padding: 14px 16px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+.fx-nav-drawer.is-open .fx-nav-drawer__head {
+  padding-top: calc(14px + env(safe-area-inset-top, 0px));
 }
 
 .fx-nav-drawer__title {
@@ -831,6 +837,18 @@ html::-webkit-scrollbar-thumb {
   flex-direction: column;
   gap: 10px;
   flex-shrink: 0;
+}
+
+/* Drawer readability: bigger tap targets + more breathing room */
+.fx-nav-drawer.is-open .fx-app-nav {
+  gap: 8px;
+  padding: 14px 14px 18px;
+}
+
+.fx-nav-drawer.is-open .fx-app-nav__link {
+  font-size: 1.05rem;
+  padding: 14px 16px;
+  border-radius: 14px;
 }
 
 .fx-nav-drawer__user {
