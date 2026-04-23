@@ -467,6 +467,8 @@ const state: {
     splits: CategorizeSplitRow[];
     note: string;
     loadingAssignments: boolean;
+    /** When tagging a bill debit: treat planner "current due" as fully handled (checkbox). */
+    billFullPayment: boolean;
   } | null;
 } = {
   session: null,
@@ -3776,27 +3778,55 @@ function renderCategorizeOverlay(snap: PlannerSnapshot | null): string {
     const a = Number.isFinite(row.amount) ? Math.abs(row.amount) : 0;
     return sum + a;
   }, 0);
-  const exactlyOneRowOneBill =
-    c.splits.length === 1 && parseSplitTarget(c.splits[0].target).kind === "BILL";
+  const uniqueBillIdsForPreset = !isCredit ? uniqueBillTargetIdsFromSplits(c.splits) : [];
+  const singleBillPlannerTarget = uniqueBillIdsForPreset.length === 1;
+  const presetBill =
+    snap && singleBillPlannerTarget ? snap.bills.find((b) => b.id === uniqueBillIdsForPreset[0]!) : null;
+  const presetBillCap = (() => {
+    if (!presetBill || !singleBillPlannerTarget) return 0;
+    const bid = uniqueBillIdsForPreset[0]!;
+    const idxs = splitIndicesForBillId(c.splits, bid);
+    const otherSum = c.splits.reduce((s, row, i) => (idxs.includes(i) ? s : s + Math.abs(row.amount)), 0);
+    const cap = Math.max(0, Math.round((transactionAmount - otherSum) * 100) / 100);
+    return Math.min(presetBill.currentAmountDue, cap);
+  })();
   const billTagAmountLabel = money(billSplitTotal);
-  let billDueFromSetup = "";
-  if (snap && exactlyOneRowOneBill) {
-    const bt = parseSplitTarget(c.splits[0].target);
-    if (bt.kind === "BILL" && "id" in bt) {
-      const b = snap.bills.find((x) => x.id === bt.id);
-      if (b) {
-        billDueFromSetup = `<p class="muted" style="margin:8px 0 0;font-size:0.88rem">From your setup: <strong>${escapeHtml(b.name)}</strong> — <strong>${money(b.currentAmountDue)}</strong> currently due (planner line item; not your whole long-term balance).</p>`;
-      }
-    }
-  }
+  const billDuePresetHtml =
+    presetBill && !c.loadingAssignments
+      ? `
+          <div class="fx-bill-due-preview" data-bill-due-preview hidden>
+            <p class="fx-bill-due-preview__title">Quick match — <strong>${escapeHtml(presetBill.name)}</strong></p>
+            <div class="fx-bill-due-preview__grid">
+              <div>
+                <span class="muted">Currently due (setup)</span>
+                <div class="fx-bill-due-preview__val" data-bill-preview-due>—</div>
+              </div>
+              <div>
+                <span class="muted">Tagged to this bill</span>
+                <div class="fx-bill-due-preview__val" data-bill-preview-tagged>—</div>
+              </div>
+              <div>
+                <span class="muted">Due after save (plan)</span>
+                <div class="fx-bill-due-preview__val fx-bill-due-preview__val--accent" data-bill-preview-after>—</div>
+              </div>
+            </div>
+            <p class="muted" style="margin:8px 0 0;font-size:0.82rem;line-height:1.45" data-bill-preview-hint></p>
+            <div class="fx-bill-due-preview__actions">
+              <button type="button" class="secondary" data-bill-preset="clear-due">Clear due in plan</button>
+              <button type="button" class="secondary" data-bill-preset="subtract-only">Subtract charge only</button>
+              <button type="button" class="secondary" data-bill-preset="match-due">Match setup due (≤ ${money(presetBillCap)})</button>
+              <button type="button" class="secondary" data-bill-preset="leave-one"${presetBill.currentAmountDue <= 1 ? " disabled" : ""}>Leave $1 due</button>
+            </div>
+          </div>`
+      : "";
   const billPaymentApplyHtml = hasAnyBillSplit
     ? `
+          ${billDuePresetHtml}
           <div class="field" style="margin-top:10px;padding:12px 14px;border:1px solid var(--border);border-radius:12px">
             <label class="fx-checkbox" style="margin:0">
-              <input type="checkbox" name="billFullPayment" />
-              <span><strong>Current due is fully handled</strong> · ${billTagAmountLabel} tagged${exactlyOneRowOneBill ? " to this bill" : " to bills"}</span>
+              <input type="checkbox" name="billFullPayment"${c.billFullPayment ? " checked" : ""} />
+              <span><strong>Current due is fully handled</strong> · ${billTagAmountLabel} tagged${singleBillPlannerTarget ? " to this bill" : " to bills"}</span>
             </label>
-            ${billDueFromSetup}
             <p class="muted" style="margin:10px 0 0;font-size:0.88rem;line-height:1.45">
               This uses <strong>amount currently due</strong> from <strong>Settings → Bills</strong> (what the planner treats as “owed next”), <em>not</em> a long-term balance like a full account payoff.
               <strong> On:</strong> set that due to <strong>$0</strong> for each tagged bill—use when this charge fully settles what you owe <em>for now</em>, even if the bank amount is a few cents over or under the due you entered (the transaction still records <strong>only what the bank posted</strong>).
@@ -4421,6 +4451,121 @@ function parseSplitTarget(value: string): PlannerActualTarget {
   }
 }
 
+function uniqueBillTargetIdsFromSplits(splits: CategorizeSplitRow[]): string[] {
+  const ids: string[] = [];
+  for (const row of splits) {
+    const t = parseSplitTarget(row.target);
+    if (t.kind === "BILL" && "id" in t) ids.push(t.id);
+  }
+  return [...new Set(ids)];
+}
+
+function taggedSumToBillId(splits: CategorizeSplitRow[], billId: string): number {
+  let sum = 0;
+  for (const row of splits) {
+    const t = parseSplitTarget(row.target);
+    if (t.kind === "BILL" && "id" in t && t.id === billId) {
+      sum += Number.isFinite(row.amount) ? Math.abs(row.amount) : 0;
+    }
+  }
+  return sum;
+}
+
+function splitIndicesForBillId(splits: CategorizeSplitRow[], billId: string): number[] {
+  const out: number[] = [];
+  splits.forEach((row, i) => {
+    const t = parseSplitTarget(row.target);
+    if (t.kind === "BILL" && "id" in t && t.id === billId) out.push(i);
+  });
+  return out;
+}
+
+/** Live preview row for "currently due" vs tagged amount (single bill target only). */
+function updateBillDuePresetPreview(): void {
+  const preview = document.querySelector<HTMLElement>("[data-bill-due-preview]");
+  const form = document.querySelector<HTMLFormElement>("#form-categorize");
+  if (!preview || !form || !state.categorizeEditor || !state.normalizedSnapshot) return;
+  const c = state.categorizeEditor;
+  if (c.amount >= 0) {
+    preview.hidden = true;
+    return;
+  }
+  syncSplitsFromForm();
+  const ids = uniqueBillTargetIdsFromSplits(c.splits);
+  if (ids.length !== 1) {
+    preview.hidden = true;
+    return;
+  }
+  const billId = ids[0]!;
+  const bill = state.normalizedSnapshot.bills.find((b) => b.id === billId);
+  if (!bill) {
+    preview.hidden = true;
+    return;
+  }
+  preview.hidden = false;
+  const due = bill.currentAmountDue;
+  const tagged = taggedSumToBillId(c.splits, billId);
+  const full = form.querySelector<HTMLInputElement>('input[name="billFullPayment"]')?.checked === true;
+  const after = full ? 0 : Math.max(0, Math.round((due - tagged) * 100) / 100);
+  preview.querySelector("[data-bill-preview-name]")!.textContent = bill.name;
+  preview.querySelector("[data-bill-preview-due]")!.textContent = money(due);
+  preview.querySelector("[data-bill-preview-tagged]")!.textContent = money(tagged);
+  preview.querySelector("[data-bill-preview-after]")!.textContent = money(after);
+  const hint = preview.querySelector("[data-bill-preview-hint]");
+  if (hint) {
+    hint.textContent = full
+      ? "Plan will show $0 currently due on this bill (bank amount is still only what you tagged)."
+      : tagged > due
+        ? "Tagged more than currently due — after save, due goes to $0."
+        : "";
+  }
+}
+
+function applyBillDuePreset(preset: string): void {
+  const c = state.categorizeEditor;
+  const snap = state.normalizedSnapshot;
+  if (!c || !snap || c.amount >= 0) return;
+  syncSplitsFromForm();
+  const ids = uniqueBillTargetIdsFromSplits(c.splits);
+  if (ids.length !== 1) return;
+  const billId = ids[0]!;
+  const bill = snap.bills.find((b) => b.id === billId);
+  if (!bill) return;
+  const txTotal = Math.abs(c.amount);
+  const idxs = splitIndicesForBillId(c.splits, billId);
+  const otherSum = c.splits.reduce((s, row, i) => (idxs.includes(i) ? s : s + Math.abs(row.amount)), 0);
+  const cap = Math.max(0, Math.round((txTotal - otherSum) * 100) / 100);
+  const due = bill.currentAmountDue;
+
+  if (preset === "clear-due") {
+    c.billFullPayment = true;
+    render();
+    return;
+  }
+  c.billFullPayment = false;
+  if (preset === "subtract-only") {
+    render();
+    return;
+  }
+  if (preset === "match-due") {
+    const target = Math.min(due, cap);
+    if (idxs.length === 0) return;
+    idxs.forEach((i, j) => {
+      c.splits[i] = { ...c.splits[i], amount: j === 0 ? target : 0 };
+    });
+    render();
+    return;
+  }
+  if (preset === "leave-one") {
+    const target = Math.max(0, Math.min(cap, Math.round((due - 1) * 100) / 100));
+    if (idxs.length === 0) return;
+    idxs.forEach((i, j) => {
+      c.splits[i] = { ...c.splits[i], amount: j === 0 ? target : 0 };
+    });
+    render();
+  }
+}
+
 function newSplitRowLocalId(): string {
   return `split_${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -4466,6 +4611,7 @@ async function openCategorizeEditor(btn: HTMLButtonElement): Promise<void> {
     splits: [{ id: newSplitRowLocalId(), target: "UNCATEGORIZED:", amount: transactionAmount, note: "" }],
     note: "",
     loadingAssignments: true,
+    billFullPayment: false,
   };
   state.error = null;
   render();
@@ -4521,6 +4667,7 @@ async function openCategorizeEditor(btn: HTMLButtonElement): Promise<void> {
       state.categorizeEditor.splits = splits;
       state.categorizeEditor.note = note;
     }
+    state.categorizeEditor.billFullPayment = false;
     state.categorizeEditor.loadingAssignments = false;
     render();
   } catch (e) {
@@ -4577,7 +4724,8 @@ function wireCategorizeButtons() {
 
   // Recalculate totals when any split field changes (without full re-render so focus is kept).
   document.querySelectorAll<HTMLElement>("#form-categorize [data-split-field], #form-categorize [data-categorize-note]").forEach((el) => {
-    el.addEventListener("input", () => {
+    const evName = el.tagName === "SELECT" ? "change" : "input";
+    el.addEventListener(evName, () => {
       syncSplitsFromForm();
       // Only re-render the totals area for performance/focus stability.
       const c = state.categorizeEditor;
@@ -4604,6 +4752,22 @@ function wireCategorizeButtons() {
         const singleReal = c.splits.length === 1 && c.splits[0].target !== "UNCATEGORIZED:" && c.splits[0].target !== "";
         learnRow.style.display = singleReal ? "" : "none";
       }
+      updateBillDuePresetPreview();
+    });
+  });
+
+  document.querySelector<HTMLInputElement>('input[name="billFullPayment"]')?.addEventListener("change", (e) => {
+    const c = state.categorizeEditor;
+    if (!c) return;
+    c.billFullPayment = (e.target as HTMLInputElement).checked;
+    updateBillDuePresetPreview();
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-bill-preset]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const preset = btn.getAttribute("data-bill-preset");
+      if (!preset) return;
+      applyBillDuePreset(preset);
     });
   });
 
@@ -4636,6 +4800,9 @@ function wireCategorizeButtons() {
 
     const form = e.target as HTMLFormElement;
     const learnAlways = (form.querySelector<HTMLInputElement>("[data-categorize-learn]")?.checked) ?? false;
+    const fullPaymentOn =
+      form.querySelector<HTMLInputElement>('input[name="billFullPayment"]')?.checked === true;
+    c.billFullPayment = fullPaymentOn;
     const isSplit = cleanSplits.length > 1;
     const primary = cleanSplits[0];
     const primaryTarget = parseSplitTarget(primary.target);
@@ -4698,8 +4865,6 @@ function wireCategorizeButtons() {
       }));
       await linkTransactionSplitsToPlannerActuals(userId, c.txId, actuals, txRef, "Manual");
 
-      const fullPaymentOn =
-        form.querySelector<HTMLInputElement>('input[name="billFullPayment"]')?.checked === true;
       const debitWithAnyBill =
         c.amount < 0 &&
         cleanSplits.some((row) => {
@@ -4741,6 +4906,8 @@ function wireCategorizeButtons() {
     }
     render();
   });
+
+  queueMicrotask(() => updateBillDuePresetPreview());
 }
 
 function wireSettingsEditorButtons() {

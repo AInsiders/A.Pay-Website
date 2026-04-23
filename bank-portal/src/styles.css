@@ -2164,7 +2164,71 @@ button:disabled {
   color: var(--success);
 }
 
+/* Bill “current due” quick presets (tag transaction modal) */
+.fx-bill-due-preview {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--accent) 10%, rgba(6, 10, 22, 0.92)), rgba(3, 6, 14, 0.88));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 12px 40px -24px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.fx-bill-due-preview__title {
+  margin: 0 0 10px;
+  font-size: 0.92rem;
+  font-weight: 650;
+}
+
+.fx-bill-due-preview__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+
+.fx-bill-due-preview__grid .muted {
+  display: block;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.fx-bill-due-preview__val {
+  font-family: var(--font-mono);
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.fx-bill-due-preview__val--accent {
+  color: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+
+.fx-bill-due-preview__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.fx-bill-due-preview__actions .secondary {
+  font-size: 0.82rem;
+  padding: 8px 12px;
+}
+
+:root[data-mode="light"] .fx-bill-due-preview {
+  background: color-mix(in srgb, var(--accent) 8%, rgba(255, 255, 255, 0.94));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 8px 28px -18px rgba(15, 23, 42, 0.12);
+}
+
 @media (max-width: 560px) {
+  .fx-bill-due-preview__grid {
+    grid-template-columns: 1fr;
+  }
+
   .fx-splits__row {
     grid-template-columns: 1fr;
   }
