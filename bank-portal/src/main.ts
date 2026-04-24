@@ -1053,6 +1053,59 @@ async function refreshFromCloudPush(userId: string) {
   }
 }
 
+async function applyRealtimePlannerRow(userId: string, row: unknown) {
+  if (state.session?.user?.id !== userId) return;
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    await refreshFromCloudPush(userId);
+    return;
+  }
+
+  state.plannerSnapshot = row;
+  const canonicalRow = toPlannerStateRow(row);
+  const canonicalSnapshot = canonicalRow?.snapshot && typeof canonicalRow.snapshot === "object"
+    ? coercePlannerSnapshotShape(canonicalRow.snapshot) as unknown as PlannerSnapshot
+    : null;
+  if (!canonicalSnapshot) {
+    await refreshFromCloudPush(userId);
+    return;
+  }
+
+  // Show the latest cloud snapshot immediately, then reconcile normalized tables in the background.
+  state.normalizedSnapshot = canonicalSnapshot;
+  syncPlannerSnapshotDraft(false);
+  render();
+
+  try {
+    await replaceNormalizedPlannerFromSnapshot(userId, canonicalSnapshot);
+  } catch (e) {
+    console.warn("realtime planner reconciliation failed", e);
+  }
+}
+
+function applyRealtimeProfileRow(userId: string, row: unknown) {
+  if (state.session?.user?.id !== userId) return;
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    void loadProfile(userId)
+      .then(() => render())
+      .catch((e) => {
+        state.error = e instanceof Error ? e.message : String(e);
+        render();
+      });
+    return;
+  }
+
+  const raw = row as Record<string, unknown>;
+  state.profile = {
+    id: String(raw.id ?? userId),
+    display_name: raw.display_name == null ? null : String(raw.display_name),
+    accent_color: raw.accent_color == null ? null : String(raw.accent_color),
+    theme_mode: raw.theme_mode === "light" ? "light" : "dark",
+  };
+  applyMode(state.profile.theme_mode);
+  applyFullTheme(state.profile.accent_color);
+  render();
+}
+
 function ensureRealtimeSyncSubscriptions(userId: string) {
   if (!isSupabaseConfigured) return;
   if (realtimeUserIdBound === userId && plannerRealtimeChannel && profileRealtimeChannel) return;
@@ -1070,8 +1123,8 @@ function ensureRealtimeSyncSubscriptions(userId: string) {
         table: "planner_snapshots",
         filter: `user_id=eq.${userId}`,
       },
-      () => {
-        void refreshFromCloudPush(userId);
+      (payload) => {
+        void applyRealtimePlannerRow(userId, payload.new);
       },
     )
     .subscribe();
@@ -1086,14 +1139,8 @@ function ensureRealtimeSyncSubscriptions(userId: string) {
         table: "profiles",
         filter: `id=eq.${userId}`,
       },
-      () => {
-        if (state.session?.user?.id !== userId) return;
-        void loadProfile(userId)
-          .then(() => render())
-          .catch((e) => {
-            state.error = e instanceof Error ? e.message : String(e);
-            render();
-          });
+      (payload) => {
+        applyRealtimeProfileRow(userId, payload.new);
       },
     )
     .subscribe();
@@ -1521,7 +1568,7 @@ async function savePlannerSnapshotDraft() {
     return;
   }
 
-  const snapshot = coercePlannerSnapshotShape(parsed);
+  const snapshot = coercePlannerSnapshotShape(parsed) as unknown as PlannerSnapshot;
   const row = toPlannerStateRow(state.plannerSnapshot);
   state.plannerSnapshotSaveBusy = true;
   state.plannerSnapshotSaveError = null;
