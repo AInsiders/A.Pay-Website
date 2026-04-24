@@ -517,6 +517,10 @@ const state: {
   categorizeEditor: null,
 };
 
+let plannerRealtimeChannel: ReturnType<typeof supabase.channel> | null = null;
+let profileRealtimeChannel: ReturnType<typeof supabase.channel> | null = null;
+let realtimeUserIdBound: string | null = null;
+
 function normalizeAccountsTxFilter(value: string | null | undefined): AccountsTxFilter {
   const candidate = String(value ?? "").trim().toUpperCase();
   return ACCOUNTS_TX_FILTERS.some((item) => item.id === candidate)
@@ -1023,6 +1027,76 @@ async function saveProfile(
     state.info = null;
     render();
   }, 2200);
+}
+
+function clearRealtimeSyncSubscriptions() {
+  if (plannerRealtimeChannel) {
+    void supabase.removeChannel(plannerRealtimeChannel);
+    plannerRealtimeChannel = null;
+  }
+  if (profileRealtimeChannel) {
+    void supabase.removeChannel(profileRealtimeChannel);
+    profileRealtimeChannel = null;
+  }
+  realtimeUserIdBound = null;
+}
+
+async function refreshFromCloudPush(userId: string) {
+  if (state.session?.user?.id !== userId) return;
+  try {
+    await loadPlannerSnapshot();
+    await loadNormalizedAndRecompute({ persist: false });
+    render();
+  } catch (e) {
+    state.error = e instanceof Error ? e.message : String(e);
+    render();
+  }
+}
+
+function ensureRealtimeSyncSubscriptions(userId: string) {
+  if (!isSupabaseConfigured) return;
+  if (realtimeUserIdBound === userId && plannerRealtimeChannel && profileRealtimeChannel) return;
+
+  clearRealtimeSyncSubscriptions();
+  realtimeUserIdBound = userId;
+
+  plannerRealtimeChannel = supabase
+    .channel(`planner-sync-${userId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "planner_snapshots",
+        filter: `user_id=eq.${userId}`,
+      },
+      () => {
+        void refreshFromCloudPush(userId);
+      },
+    )
+    .subscribe();
+
+  profileRealtimeChannel = supabase
+    .channel(`profile-sync-${userId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "profiles",
+        filter: `id=eq.${userId}`,
+      },
+      () => {
+        if (state.session?.user?.id !== userId) return;
+        void loadProfile(userId)
+          .then(() => render())
+          .catch((e) => {
+            state.error = e instanceof Error ? e.message : String(e);
+            render();
+          });
+      },
+    )
+    .subscribe();
 }
 
 async function refreshBankData() {
@@ -6313,6 +6387,7 @@ async function init() {
     state.session = data.session;
     if (state.session?.user) {
       try {
+        ensureRealtimeSyncSubscriptions(state.session.user.id);
         await loadProfile(state.session.user.id);
         await loadPlannerSnapshot();
         await loadNormalizedAndRecompute({ persist: true });
@@ -6341,6 +6416,7 @@ async function init() {
       if (session?.user) {
         state.authModalOpen = false;
         try {
+          ensureRealtimeSyncSubscriptions(session.user.id);
           await loadProfile(session.user.id);
           if (shouldReloadSessionData) {
             await loadPlannerSnapshot();
@@ -6351,6 +6427,7 @@ async function init() {
           state.error = e instanceof Error ? e.message : String(e);
         }
       } else {
+        clearRealtimeSyncSubscriptions();
         state.profile = null;
         state.plannerSnapshot = null;
         state.plannerSnapshotDraft = "";
