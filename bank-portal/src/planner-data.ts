@@ -2,6 +2,10 @@
 // Wraps Supabase reads/writes for the normalized planner tables and exposes
 // `loadPlannerSnapshot` + `recomputeAndPersistPlan` so the UI can just do
 // `await api.saveBill(bill); await api.recompute(); render();` patterns.
+//
+// Source-of-truth model: normalized tables are authoritative for the web UI. The Android app
+// converges via the `planner_snapshots` row (pull when `updated_at` is newer). Android-only planner
+// edits still need normalized upserts (or a server-side snapshot expander) to show up in this web CRUD path.
 
 import { supabase } from "./supabase";
 import type { PlannerPlan, PlannerScenarioMode } from "./planner-state";
@@ -27,6 +31,7 @@ import {
   type SnapshotHousingPayment,
   type SnapshotIncomeSource,
   type SnapshotPaycheck,
+  type SnapshotPaycheckAction,
   type SnapshotRecurringExpense,
   type SnapshotUserCategory,
 } from "./planner-engine-shared";
@@ -49,6 +54,69 @@ function dateOr(v: unknown): string | null {
   return t.slice(0, 10);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function mergeById<T extends { id: string }>(canonicalRows: unknown, normalizedRows: T[]): T[] {
+  if (!Array.isArray(canonicalRows) || normalizedRows.length === 0) return normalizedRows;
+  const canonicalById = new Map<string, Record<string, unknown>>();
+  for (const row of canonicalRows) {
+    if (!isRecord(row)) continue;
+    const id = row.id;
+    if (typeof id === "string" && id) {
+      canonicalById.set(id, row);
+    }
+  }
+  return normalizedRows.map((row) => {
+    const canonical = canonicalById.get(row.id);
+    return canonical ? ({ ...canonical, ...row } as T) : row;
+  });
+}
+
+function mergeObject<T extends object | null | undefined>(canonicalValue: unknown, normalizedValue: T): T {
+  if (normalizedValue == null || !isRecord(normalizedValue)) return normalizedValue;
+  return { ...(isRecord(canonicalValue) ? canonicalValue : {}), ...normalizedValue } as T;
+}
+
+export function mergeCanonicalPlannerSnapshot(
+  canonicalSnapshot: unknown,
+  normalizedSnapshot: PlannerSnapshot,
+): PlannerSnapshot {
+  if (!isRecord(canonicalSnapshot)) return normalizedSnapshot;
+  return {
+    ...canonicalSnapshot,
+    ...normalizedSnapshot,
+    accounts: mergeById(canonicalSnapshot.accounts, normalizedSnapshot.accounts),
+    incomeSources: mergeById(canonicalSnapshot.incomeSources, normalizedSnapshot.incomeSources),
+    paychecks: mergeById(canonicalSnapshot.paychecks, normalizedSnapshot.paychecks),
+    paycheckActions: mergeById(canonicalSnapshot.paycheckActions, normalizedSnapshot.paycheckActions),
+    bills: mergeById(canonicalSnapshot.bills, normalizedSnapshot.bills),
+    billPayments: mergeById(canonicalSnapshot.billPayments, normalizedSnapshot.billPayments),
+    debts: mergeById(canonicalSnapshot.debts, normalizedSnapshot.debts),
+    debtTransactions: mergeById(canonicalSnapshot.debtTransactions, normalizedSnapshot.debtTransactions),
+    expenses: mergeById(canonicalSnapshot.expenses, normalizedSnapshot.expenses),
+    expenseSpends: mergeById(canonicalSnapshot.expenseSpends, normalizedSnapshot.expenseSpends),
+    housingConfig: mergeObject(canonicalSnapshot.housingConfig, normalizedSnapshot.housingConfig),
+    housingBuckets: mergeById(canonicalSnapshot.housingBuckets, normalizedSnapshot.housingBuckets),
+    housingPayments: mergeById(canonicalSnapshot.housingPayments, normalizedSnapshot.housingPayments),
+    goals: mergeById(canonicalSnapshot.goals, normalizedSnapshot.goals),
+    cashAdjustments: mergeById(canonicalSnapshot.cashAdjustments, normalizedSnapshot.cashAdjustments),
+    settings: mergeObject(canonicalSnapshot.settings, normalizedSnapshot.settings) ?? {},
+    deductionRules: mergeById(canonicalSnapshot.deductionRules, normalizedSnapshot.deductionRules),
+    categories: mergeById(canonicalSnapshot.categories, normalizedSnapshot.categories),
+    labels: mergeById(canonicalSnapshot.labels, normalizedSnapshot.labels),
+    notificationSettings: mergeObject(canonicalSnapshot.notificationSettings, normalizedSnapshot.notificationSettings) ?? {},
+    exportMetadata: mergeObject(canonicalSnapshot.exportMetadata, normalizedSnapshot.exportMetadata) ?? {},
+  } as PlannerSnapshot;
+}
+
+function enumOr<T extends string>(raw: unknown, allowed: readonly T[], fallback: T): T {
+  if (typeof raw !== "string") return fallback;
+  const t = raw.trim() as T;
+  return (allowed as readonly string[]).includes(t) ? t : fallback;
+}
+
 export async function currentUserId(): Promise<string | null> {
   const { data } = await supabase.auth.getUser();
   return data.user?.id ?? null;
@@ -61,6 +129,7 @@ export async function loadPlannerSnapshot(userId: string): Promise<PlannerSnapsh
     accounts,
     incomeSources,
     paychecks,
+    paycheckActions,
     bills,
     billPayments,
     debts,
@@ -80,6 +149,7 @@ export async function loadPlannerSnapshot(userId: string): Promise<PlannerSnapsh
     filter("bank_accounts"),
     filter("income_sources"),
     filter("paychecks"),
+    filter("paycheck_actions"),
     filter("bills"),
     filter("bill_payments"),
     filter("debts"),
@@ -144,6 +214,19 @@ export async function loadPlannerSnapshot(userId: string): Promise<PlannerSnapsh
         deposited: r.deposited === true,
         accountId: r.account_id ? String(r.account_id) : null,
       } satisfies SnapshotPaycheck;
+    }),
+    paycheckActions: (paycheckActions.data ?? []).map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? ""),
+        paycheckId: String(r.paycheck_id ?? ""),
+        accountId: r.account_id ? String(r.account_id) : null,
+        type: String(r.type ?? "BILL_GROUP"),
+        sourceId: r.source_id ? String(r.source_id) : null,
+        label: String(r.label ?? ""),
+        amount: numOr(r.amount, 0),
+        createdAt: typeof r.created_at === "string" ? r.created_at : null,
+      } satisfies SnapshotPaycheckAction;
     }),
     bills: (bills.data ?? []).map((raw) => {
       const r = raw as Record<string, unknown>;
@@ -267,8 +350,13 @@ export async function loadPlannerSnapshot(userId: string): Promise<PlannerSnapsh
     }),
     settings: {
       targetBuffer: numOr(rawSettings.targetBuffer, 0),
-      selectedScenarioMode: (rawSettings.selectedScenarioMode as PlannerScenarioMode) ?? "FIXED",
-      planningStyle: (rawSettings.planningStyle as string) ?? "BALANCED",
+      selectedScenarioMode: enumOr(
+        rawSettings.selectedScenarioMode,
+        ["FIXED", "LOWEST_INCOME", "MOST_EFFICIENT", "HIGHEST_INCOME"] as const,
+        "FIXED",
+      ),
+      // Keep aligned with the Kotlin engine enum: SURVIVAL | BALANCED | ACCELERATED.
+      planningStyle: enumOr(rawSettings.planningStyle, ["SURVIVAL", "BALANCED", "ACCELERATED"] as const, "BALANCED"),
       horizonDays: numOr(rawSettings.horizonDays, 120),
       safetyFloorCash: rawSettings.safetyFloorCash !== undefined ? numOr(rawSettings.safetyFloorCash, 0) : undefined,
       reserveNearFutureWindowDays: rawSettings.reserveNearFutureWindowDays !== undefined
@@ -280,13 +368,23 @@ export async function loadPlannerSnapshot(userId: string): Promise<PlannerSnapsh
       sameDayIncomeBeforeSameDayBills: typeof rawSettings.sameDayIncomeBeforeSameDayBills === "boolean"
         ? rawSettings.sameDayIncomeBeforeSameDayBills
         : undefined,
-      roundingMode: rawSettings.roundingMode !== undefined ? String(rawSettings.roundingMode) : undefined,
-      optimizationGoal: rawSettings.optimizationGoal !== undefined ? String(rawSettings.optimizationGoal) : undefined,
-      payoffMode: rawSettings.payoffMode !== undefined ? String(rawSettings.payoffMode) : undefined,
-      housingPaymentMode: rawSettings.housingPaymentMode !== undefined ? String(rawSettings.housingPaymentMode) : undefined,
-      housingPayoffTargetMode: rawSettings.housingPayoffTargetMode !== undefined
-        ? String(rawSettings.housingPayoffTargetMode)
-        : undefined,
+      roundingMode: enumOr(
+        rawSettings.roundingMode,
+        ["NEAREST_CENT", "UP_TO_CENT", "DOWN_TO_CENT"] as const,
+        "NEAREST_CENT",
+      ),
+      optimizationGoal: enumOr(
+        rawSettings.optimizationGoal,
+        ["STAY_CURRENT", "CATCH_UP_FAST", "PAY_DEBT_FAST", "MINIMIZE_BORROWING", "BALANCED"] as const,
+        "BALANCED",
+      ),
+      payoffMode: enumOr(rawSettings.payoffMode, ["SNOWBALL", "AVALANCHE", "CUSTOM"] as const, "SNOWBALL"),
+      housingPaymentMode: enumOr(rawSettings.housingPaymentMode, ["MINIMUM_CURRENT", "FULL_CURRENT"] as const, "MINIMUM_CURRENT"),
+      housingPayoffTargetMode: enumOr(
+        rawSettings.housingPayoffTargetMode,
+        ["REGULAR_DEBTS_ONLY", "INCLUDE_HOUSING_ARREARS"] as const,
+        "REGULAR_DEBTS_ONLY",
+      ),
       priorityOrder: rawSettings.priorityOrder !== undefined ? String(rawSettings.priorityOrder) : undefined,
     },
     deductionRules: (deductionRules.data ?? []).map((raw) => {
@@ -334,8 +432,12 @@ export async function loadPlannerSnapshot(userId: string): Promise<PlannerSnapsh
 }
 
 /** Runs the shared planner engine and upserts a fresh `planner_snapshots` row for the user. */
-export async function recomputeAndPersistPlan(userId: string): Promise<{ plan: PlannerPlan; snapshot: PlannerSnapshot }> {
-  const snapshot = await loadPlannerSnapshot(userId);
+export async function recomputeAndPersistPlan(
+  userId: string,
+  canonicalSnapshot: unknown = null,
+): Promise<{ plan: PlannerPlan; snapshot: PlannerSnapshot }> {
+  const normalizedSnapshot = await loadPlannerSnapshot(userId);
+  const snapshot = mergeCanonicalPlannerSnapshot(canonicalSnapshot, normalizedSnapshot);
   const plan = buildPlannerPlan(snapshot);
   const nowIso = new Date().toISOString();
   const { error } = await supabase.from("planner_snapshots").upsert({
@@ -590,6 +692,27 @@ export async function saveNotificationSettings(userId: string, patch: Notificati
   if (error) throw new Error(error.message);
 }
 
+/**
+ * Ensures a `planner_settings` row exists so notification prefs and planning defaults
+ * persist in Supabase (empty `planner_settings` was causing “missing row” in cloud).
+ */
+export async function ensureDefaultPlannerSettings(userId: string): Promise<void> {
+  const { data, error } = await supabase.from("planner_settings").select("user_id").eq("user_id", userId).maybeSingle();
+  if (error) throw new Error(error.message);
+  if (data) return;
+  const { error: upErr } = await supabase.from("planner_settings").upsert({
+    user_id: userId,
+    settings: {
+      horizonDays: 120,
+      selectedScenarioMode: "FIXED",
+      planningStyle: "BALANCED",
+      reserveNearFutureWindowDays: 21,
+    },
+    notification_settings: {},
+  });
+  if (upErr) throw new Error(upErr.message);
+}
+
 export interface DeductionRuleFormInput {
   id?: string;
   name: string;
@@ -728,6 +851,61 @@ export async function deleteAllNormalizedPlannerData(userId: string): Promise<vo
   if (snapErr) throw new Error(`planner_snapshots: ${snapErr.message}`);
   const { error: setErr } = await supabase.from("planner_settings").delete().eq("user_id", userId);
   if (setErr) throw new Error(`planner_settings: ${setErr.message}`);
+}
+
+async function replaceIdTableRows(userId: string, table: string, nextIds: readonly string[]): Promise<void> {
+  const { data, error } = await supabase.from(table).select("id").eq("user_id", userId);
+  if (error) throw new Error(`${table}: ${error.message}`);
+  const keep = new Set(nextIds.filter((id) => id.trim().length > 0));
+  const staleIds = (data ?? [])
+    .map((row) => String((row as { id?: string }).id ?? ""))
+    .filter((id) => id && !keep.has(id));
+  if (staleIds.length === 0) return;
+  const { error: deleteError } = await supabase.from(table).delete().eq("user_id", userId).in("id", staleIds);
+  if (deleteError) throw new Error(`${table}: ${deleteError.message}`);
+}
+
+export async function replaceNormalizedPlannerFromSnapshot(userId: string, snap: PlannerSnapshot): Promise<void> {
+  const paycheckActions = Array.isArray(snap.paycheckActions) ? snap.paycheckActions : [];
+  const billPayments = Array.isArray(snap.billPayments) ? snap.billPayments : [];
+  const expenseSpends = Array.isArray(snap.expenseSpends) ? snap.expenseSpends : [];
+  const debtTransactions = Array.isArray(snap.debtTransactions) ? snap.debtTransactions : [];
+  const housingPayments = Array.isArray(snap.housingPayments) ? snap.housingPayments : [];
+  const paychecks = Array.isArray(snap.paychecks) ? snap.paychecks : [];
+  const bills = Array.isArray(snap.bills) ? snap.bills : [];
+  const debts = Array.isArray(snap.debts) ? snap.debts : [];
+  const expenses = Array.isArray(snap.expenses) ? snap.expenses : [];
+  const housingBuckets = Array.isArray(snap.housingBuckets) ? snap.housingBuckets : [];
+  const goals = Array.isArray(snap.goals) ? snap.goals : [];
+  const deductionRules = Array.isArray(snap.deductionRules) ? snap.deductionRules : [];
+  const categories = Array.isArray(snap.categories) ? snap.categories : [];
+  const labels = Array.isArray(snap.labels) ? snap.labels : [];
+  const cashAdjustments = Array.isArray(snap.cashAdjustments) ? snap.cashAdjustments : [];
+  const accounts = Array.isArray(snap.accounts) ? snap.accounts : [];
+  const incomeSources = Array.isArray(snap.incomeSources) ? snap.incomeSources : [];
+
+  await replaceIdTableRows(userId, "paycheck_actions", paycheckActions.map((row) => row.id));
+  await replaceIdTableRows(userId, "bill_payments", billPayments.map((row) => row.id));
+  await replaceIdTableRows(userId, "expense_spends", expenseSpends.map((row) => row.id));
+  await replaceIdTableRows(userId, "debt_transactions", debtTransactions.map((row) => row.id));
+  await replaceIdTableRows(userId, "housing_payments", housingPayments.map((row) => row.id));
+  await replaceIdTableRows(userId, "paychecks", paychecks.map((row) => row.id));
+  await replaceIdTableRows(userId, "bills", bills.map((row) => row.id));
+  await replaceIdTableRows(userId, "debts", debts.map((row) => row.id));
+  await replaceIdTableRows(userId, "recurring_expenses", expenses.map((row) => row.id));
+  await replaceIdTableRows(userId, "housing_buckets", housingBuckets.map((row) => row.id));
+  await replaceIdTableRows(userId, "goals", goals.map((row) => row.id));
+  await replaceIdTableRows(userId, "deduction_rules", deductionRules.map((row) => row.id));
+  await replaceIdTableRows(userId, "user_categories", categories.map((row) => row.id));
+  await replaceIdTableRows(userId, "custom_labels", labels.map((row) => row.id));
+  await replaceIdTableRows(userId, "cash_adjustments", cashAdjustments.map((row) => row.id));
+  await replaceIdTableRows(userId, "bank_accounts", accounts.map((row) => row.id));
+  await replaceIdTableRows(userId, "income_sources", incomeSources.map((row) => row.id));
+  if (snap.housingConfig == null) {
+    const { error } = await supabase.from("housing_config").delete().eq("user_id", userId);
+    if (error) throw new Error(`housing_config: ${error.message}`);
+  }
+  await upsertNormalizedFromPlannerSnapshot(userId, snap);
 }
 
 /**
@@ -909,6 +1087,21 @@ export async function upsertNormalizedFromPlannerSnapshot(userId: string, snap: 
         amount: p.amount,
         deposited: p.deposited === true,
         account_id: p.accountId ?? null,
+      })),
+    );
+    if (error) throw new Error(error.message);
+  }
+  if (s.paycheckActions?.length) {
+    const { error } = await supabase.from("paycheck_actions").upsert(
+      s.paycheckActions.map((action) => withUser(userId, {
+        id: action.id,
+        paycheck_id: action.paycheckId,
+        account_id: action.accountId ?? null,
+        type: action.type,
+        source_id: action.sourceId ?? null,
+        label: action.label ?? "",
+        amount: action.amount,
+        created_at: action.createdAt ?? new Date().toISOString(),
       })),
     );
     if (error) throw new Error(error.message);

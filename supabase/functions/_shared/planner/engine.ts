@@ -121,9 +121,11 @@ function forecastPaychecks(
     const rule = source.recurringRule;
     if (!rule) continue;
     const amt = scenarioAmount(source.amountRange, mode);
-    const startingAnchor = parseIsoDate(source.nextExpectedPayDate ?? null) ?? today;
-    const from = startingAnchor.getTime() < today.getTime() ? today : startingAnchor;
-    const dates = expandRecurringDates(rule, from, horizon);
+    const anchoredRule = {
+      ...rule,
+      anchorDate: source.nextExpectedPayDate ?? rule.anchorDate,
+    };
+    const dates = expandRecurringDates(anchoredRule, today, horizon);
     for (const date of dates) {
       const entered = inferEnteredAmount(snapshot, source.id, date);
       out.push({
@@ -250,12 +252,16 @@ function forecastDebtObligations(
 function forecastHousingObligations(
   snapshot: PlannerSnapshot,
   today: Date,
+  horizon: Date,
 ): ForecastObligation[] {
   const out: ForecastObligation[] = [];
+  const coveredMonths = new Set<string>();
+  const monthKey = (date: Date) => `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
   for (const bucket of snapshot.housingBuckets) {
     const remaining = Math.max(0, money(bucket.amountDue - bucket.amountPaid));
     if (remaining <= 0) continue;
     const due = parseIsoDate(bucket.dueDate ?? null) ?? today;
+    if (bucket.monthKey) coveredMonths.add(bucket.monthKey);
     out.push({
       id: `rent|${bucket.id}`,
       sourceId: bucket.id,
@@ -268,7 +274,41 @@ function forecastHousingObligations(
       isHardDue: true,
     });
   }
-  return out;
+  const config = snapshot.housingConfig;
+  if (config && config.currentMonthlyRent > 0) {
+    const startMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+    const endMonth = new Date(Date.UTC(horizon.getUTCFullYear(), horizon.getUTCMonth(), 1));
+    const dueDay = Math.max(1, Math.min(31, Math.trunc(config.rentDueDay || 1)));
+    const currentMonthKey = monthKey(today);
+    for (
+      let cursor = startMonth;
+      cursor.getTime() <= endMonth.getTime();
+      cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1))
+    ) {
+      const key = monthKey(cursor);
+      if (coveredMonths.has(key)) continue;
+      const lastDayOfMonth = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0)).getUTCDate();
+      const due = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), Math.min(dueDay, lastDayOfMonth)));
+      const amount = money(
+        key === currentMonthKey
+          ? Math.min(config.currentMonthlyRent, config.minimumAcceptablePayment || config.currentMonthlyRent)
+          : config.currentMonthlyRent,
+      );
+      if (amount <= 0) continue;
+      out.push({
+        id: `rent|${key}`,
+        sourceId: key,
+        sourceType: "RENT",
+        label: `Housing ${due.toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" })}`,
+        dueDate: due,
+        amount,
+        minimumDue: amount,
+        isEssential: true,
+        isHardDue: true,
+      });
+    }
+  }
+  return out.sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime());
 }
 
 function essentialDailyRate(expense: SnapshotRecurringExpense): number {
@@ -358,10 +398,13 @@ function buildTimeline(
     const payNowList: PlannerAllocationLine[] = dueInWindow
       .filter((o) => o.isHardDue)
       .map((o) => ({
+        obligationId: o.id,
         sourceId: o.sourceId,
+        sourceType: o.sourceType,
         label: o.label,
         bucket: o.sourceType === "DEBT" ? "DEBT_MINIMUM" : o.sourceType === "RENT" ? "HOUSING_CURRENT" : "BILL",
         amount: o.amount,
+        dueDate: toIsoDate(o.dueDate),
         rationale: `Due ${toIsoDate(o.dueDate)} — covered from ${p.payerLabel}`,
       }));
     const reserveNowList: PlannerReserveAllocationLine[] = obligations
@@ -539,7 +582,7 @@ export function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
   const obligations = [
     ...forecastBillObligations(snapshot, today, horizon),
     ...forecastDebtObligations(snapshot, today, horizon),
-    ...forecastHousingObligations(snapshot, today),
+    ...forecastHousingObligations(snapshot, today, horizon),
   ].sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime());
 
   const cash = totalCashAvailable(snapshot);

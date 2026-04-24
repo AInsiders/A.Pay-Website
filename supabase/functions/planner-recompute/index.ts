@@ -83,6 +83,7 @@ interface MonetaryRange { minimum?: number; target?: number; maximum?: number }
 interface SnapshotAccount { id: string; name: string; type: string; currentBalance: number; availableBalance: number; includeInPlanning: boolean; protectedFromPayoff?: boolean; tellerEnrollmentId?: string | null; tellerLinkedAccountId?: string | null }
 interface SnapshotIncomeSource { id: string; name: string; payerLabel?: string; recurringRule: RecurringRule; amountRange: MonetaryRange; forecastAmountMode?: "FIXED" | "RANGE"; inputMode?: "GROSS" | "NET" | "USABLE"; nextExpectedPayDate?: string | null; isActive?: boolean; isManualOnly?: boolean; deductionRuleIds?: string[] }
 interface SnapshotPaycheck { id: string; incomeSourceId?: string | null; payerLabel?: string; date: string; amount: number; deposited?: boolean; accountId?: string | null }
+interface SnapshotPaycheckAction { id: string; paycheckId: string; accountId?: string | null; type: string; sourceId?: string | null; label?: string; amount: number; createdAt?: string | null }
 interface SnapshotBill { id: string; name: string; amountDue: number; minimumDue: number; currentAmountDue: number; recurringRule?: RecurringRule; category?: string; isEssential?: boolean; status?: "UPCOMING" | "DUE" | "PAID" | "OVERDUE" | "PARTIAL"; paymentPolicy?: "HARD_DUE" | "FLEXIBLE_DUE" }
 interface SnapshotBillPayment { id: string; billId: string; amount: number; paymentDate: string }
 interface SnapshotDebt { id: string; name: string; lender?: string; type?: string; currentBalance: number; minimumDue: number; requiredDueDate?: string | null; arrearsAmount?: number; bankAccountId?: string | null }
@@ -107,6 +108,7 @@ interface PlannerSnapshot {
   accounts: SnapshotAccount[];
   incomeSources: SnapshotIncomeSource[];
   paychecks: SnapshotPaycheck[];
+  paycheckActions: SnapshotPaycheckAction[];
   bills: SnapshotBill[];
   billPayments: SnapshotBillPayment[];
   debts: SnapshotDebt[];
@@ -122,7 +124,16 @@ interface PlannerSnapshot {
 }
 
 interface PlannerDueItemRecommendation { sourceId?: string; label: string; amount: number; dueDate?: string; riskLevel?: PlannerRiskLevel; rationale?: string }
-interface PlannerAllocationLine { sourceId?: string | null; label: string; bucket?: string; amount: number; rationale?: string }
+interface PlannerAllocationLine {
+  obligationId?: string;
+  sourceId?: string | null;
+  sourceType?: string;
+  label: string;
+  bucket?: string;
+  amount: number;
+  dueDate?: string;
+  rationale?: string;
+}
 interface PlannerReserveAllocationLine {
   obligationId?: string; sourceId?: string | null; label: string; amount: number; dueDate?: string; sourcePayDate?: string | null;
   reserveKind?: string;
@@ -419,9 +430,11 @@ function forecastPaychecks(snapshot: PlannerSnapshot, mode: PlannerScenarioMode,
     const rule = source.recurringRule;
     if (!rule) continue;
     const amt = scenarioAmount(source.amountRange, mode);
-    const startingAnchor = parseIsoDate(source.nextExpectedPayDate ?? null) ?? today;
-    const from = startingAnchor.getTime() < today.getTime() ? today : startingAnchor;
-    const dates = expandRecurringDates(rule, from, horizon);
+    const anchoredRule: RecurringRule = {
+      ...rule,
+      anchorDate: source.nextExpectedPayDate ?? rule.anchorDate,
+    };
+    const dates = expandRecurringDates(anchoredRule, today, horizon);
     for (const date of dates) {
       const entered = snapshot.paychecks.find((p) => {
         if (p.incomeSourceId && p.incomeSourceId !== source.id) return false;
@@ -517,19 +530,51 @@ function liveBalanceForDebt(debt: SnapshotDebt, accountsById: Map<string, Snapsh
   return Math.abs(account.currentBalance);
 }
 
-function forecastHousingObligations(snapshot: PlannerSnapshot, today: Date): ForecastObligation[] {
+function forecastHousingObligations(snapshot: PlannerSnapshot, today: Date, horizon: Date): ForecastObligation[] {
   const out: ForecastObligation[] = [];
+  const coveredMonths = new Set<string>();
+  const monthKey = (date: Date) => `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
   for (const bucket of snapshot.housingBuckets) {
     const remaining = Math.max(0, money(bucket.amountDue - bucket.amountPaid));
     if (remaining <= 0) continue;
     const due = parseIsoDate(bucket.dueDate ?? null) ?? today;
+    if (bucket.monthKey) coveredMonths.add(bucket.monthKey);
     out.push({
       id: `rent|${bucket.id}`, sourceId: bucket.id, sourceType: "RENT",
       label: bucket.label || "Housing", dueDate: due, amount: remaining,
       minimumDue: remaining, isEssential: true, isHardDue: true,
     });
   }
-  return out;
+  const config = snapshot.housingConfig;
+  if (config && config.currentMonthlyRent > 0) {
+    const startMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+    const endMonth = new Date(Date.UTC(horizon.getUTCFullYear(), horizon.getUTCMonth(), 1));
+    const dueDay = Math.max(1, Math.min(31, Math.trunc(config.rentDueDay || 1)));
+    const currentMonthKey = monthKey(today);
+    for (
+      let cursor = startMonth;
+      cursor.getTime() <= endMonth.getTime();
+      cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1))
+    ) {
+      const key = monthKey(cursor);
+      if (coveredMonths.has(key)) continue;
+      const lastDayOfMonth = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0)).getUTCDate();
+      const due = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), Math.min(dueDay, lastDayOfMonth)));
+      const amount = money(
+        key === currentMonthKey
+          ? Math.min(config.currentMonthlyRent, config.minimumAcceptablePayment || config.currentMonthlyRent)
+          : config.currentMonthlyRent,
+      );
+      if (amount <= 0) continue;
+      out.push({
+        id: `rent|${key}`, sourceId: key, sourceType: "RENT",
+        label: `Housing ${due.toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" })}`,
+        dueDate: due, amount,
+        minimumDue: amount, isEssential: true, isHardDue: true,
+      });
+    }
+  }
+  return out.sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime());
 }
 
 function essentialDailyRate(expense: SnapshotRecurringExpense): number {
@@ -669,9 +714,9 @@ function buildTimeline(
       return t < hi;
     });
     const payNowList: PlannerAllocationLine[] = dueInWindow.map((o) => ({
-      sourceId: o.sourceId, label: o.label,
+      obligationId: o.id, sourceId: o.sourceId, sourceType: o.sourceType, label: o.label,
       bucket: o.sourceType === "DEBT" ? "DEBT_MINIMUM" : o.sourceType === "RENT" ? "HOUSING_CURRENT" : "BILL",
-      amount: o.amount, rationale: `Due ${toIsoDate(o.dueDate)} — covered from ${p.payerLabel}`,
+      amount: o.amount, dueDate: toIsoDate(o.dueDate), rationale: `Due ${toIsoDate(o.dueDate)} — covered from ${p.payerLabel}`,
     }));
     const reserveStart0 = intervalEnd0;
     let reserveEnd0 = startOfDay(addDays(reserveStart0, reserveWindowDays));
@@ -727,7 +772,7 @@ function buildPlannerPlan(snapshot: PlannerSnapshot): PlannerPlan {
   const obligations = [
     ...forecastBillObligations(snapshot, today, horizon),
     ...forecastDebtObligations(snapshot, today, horizon),
-    ...forecastHousingObligations(snapshot, today),
+    ...forecastHousingObligations(snapshot, today, horizon),
   ].sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime());
 
   const cash = totalCashAvailable(snapshot);
@@ -1059,12 +1104,13 @@ function dateOr(v: unknown): string | null {
 async function loadPlannerSnapshot(client: SupabaseClient, userId: string): Promise<PlannerSnapshot> {
   const filter = (t: string) => client.from(t).select("*").eq("user_id", userId);
   const [
-    accounts, incomeSources, paychecks, bills, billPayments,
+    accounts, incomeSources, paychecks, paycheckActions, bills, billPayments,
     debts, debtTransactions, expenses, expenseSpends,
     housingConfig, housingBuckets, housingPayments,
     goals, cashAdjustments, settings,
   ] = await Promise.all([
     filter("bank_accounts"), filter("income_sources"), filter("paychecks"),
+    filter("paycheck_actions"),
     filter("bills"), filter("bill_payments"), filter("debts"), filter("debt_transactions"),
     filter("recurring_expenses"), filter("expense_spends"),
     filter("housing_config"), filter("housing_buckets"), filter("housing_payments"),
@@ -1112,6 +1158,19 @@ async function loadPlannerSnapshot(client: SupabaseClient, userId: string): Prom
         payerLabel: String(r.payer_label ?? ""), date: String(dateOr(r.date) ?? ""),
         amount: numOr(r.amount, 0), deposited: r.deposited === true,
         accountId: r.account_id ? String(r.account_id) : null,
+      };
+    }),
+    paycheckActions: (paycheckActions.data ?? []).map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? ""),
+        paycheckId: String(r.paycheck_id ?? ""),
+        accountId: r.account_id ? String(r.account_id) : null,
+        type: String(r.type ?? "BILL_GROUP"),
+        sourceId: r.source_id ? String(r.source_id) : null,
+        label: String(r.label ?? ""),
+        amount: numOr(r.amount, 0),
+        createdAt: typeof r.created_at === "string" ? r.created_at : null,
       };
     }),
     bills: (bills.data ?? []).map((raw) => {

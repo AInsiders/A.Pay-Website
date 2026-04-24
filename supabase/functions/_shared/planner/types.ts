@@ -20,10 +20,13 @@ export interface PlannerDueItemRecommendation {
 }
 
 export interface PlannerAllocationLine {
+  obligationId?: string;
   sourceId?: string | null;
+  sourceType?: string;
   label: string;
   bucket?: string;
   amount: number;
+  dueDate?: string;
   rationale?: string;
 }
 
