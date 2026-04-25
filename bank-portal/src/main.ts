@@ -10,6 +10,7 @@ import {
   planWarnings,
   toPlannerStateRow,
   type PlannerPlan,
+  type PlannerNonPaydayObligation,
   type PlannerReserveAllocationLine,
   type PlannerStateRow,
   type PlannerTimelinePaycheckPlan,
@@ -955,6 +956,31 @@ function syncPlannerSnapshotDraft(force = false) {
   }
 }
 
+function logPlannerSyncEvent(
+  eventType: string,
+  status: "started" | "ok" | "error",
+  options: { userId?: string; durationMs?: number; error?: unknown; metadata?: Record<string, unknown> } = {},
+) {
+  const userId = options.userId ?? state.session?.user?.id;
+  if (!isSupabaseConfigured || !userId) return;
+  const errorMessage = options.error instanceof Error
+    ? options.error.message
+    : options.error == null
+      ? null
+      : String(options.error);
+  void supabase.from("planner_sync_events").insert({
+    user_id: userId,
+    source_platform: "web",
+    event_type: eventType,
+    status,
+    duration_ms: options.durationMs ?? null,
+    error_message: errorMessage,
+    metadata: options.metadata ?? {},
+  }).then(({ error }) => {
+    if (error) console.warn("planner sync event log failed", error.message);
+  });
+}
+
 async function loadProfile(userId: string) {
   const { data, error } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle();
   if (error) throw error;
@@ -982,16 +1008,19 @@ async function saveProfile(
   partial: Partial<Pick<Profile, "display_name" | "accent_color" | "theme_mode">>,
 ) {
   if (!state.session?.user.id) return;
+  const startedAt = Date.now();
+  const userId = state.session.user.id;
   state.busy = true;
   state.error = null;
   render();
   const { data, error } = await supabase
     .from("profiles")
-    .upsert({ id: state.session.user.id, ...partial, updated_at: new Date().toISOString() })
+    .upsert({ id: userId, ...partial, updated_at: new Date().toISOString() })
     .select()
     .single();
   state.busy = false;
   if (error) {
+    logPlannerSyncEvent("profile_save", "error", { userId, durationMs: Date.now() - startedAt, error });
     state.error = error.message;
     render();
     return;
@@ -1009,6 +1038,7 @@ async function saveProfile(
       },
     });
     if (authError) {
+      logPlannerSyncEvent("profile_auth_metadata_sync", "error", { userId, durationMs: Date.now() - startedAt, error: authError });
       applyMode(state.profile.theme_mode);
       applyFullTheme(state.profile.accent_color);
       state.error = `Appearance saved, but account profile sync failed: ${authError.message}`;
@@ -1021,6 +1051,7 @@ async function saveProfile(
   }
   applyMode(state.profile.theme_mode);
   applyFullTheme(state.profile.accent_color);
+  logPlannerSyncEvent("profile_save", "ok", { userId, durationMs: Date.now() - startedAt, metadata: { fields: Object.keys(partial) } });
   state.info = "Appearance saved.";
   render();
   setTimeout(() => {
@@ -1043,11 +1074,14 @@ function clearRealtimeSyncSubscriptions() {
 
 async function refreshFromCloudPush(userId: string) {
   if (state.session?.user?.id !== userId) return;
+  const startedAt = Date.now();
   try {
     await loadPlannerSnapshot();
     await loadNormalizedAndRecompute({ persist: false });
+    logPlannerSyncEvent("realtime_planner_refresh", "ok", { userId, durationMs: Date.now() - startedAt });
     render();
   } catch (e) {
+    logPlannerSyncEvent("realtime_planner_refresh", "error", { userId, durationMs: Date.now() - startedAt, error: e });
     state.error = e instanceof Error ? e.message : String(e);
     render();
   }
@@ -1078,6 +1112,7 @@ async function applyRealtimePlannerRow(userId: string, row: unknown) {
   try {
     await replaceNormalizedPlannerFromSnapshot(userId, canonicalSnapshot);
   } catch (e) {
+    logPlannerSyncEvent("realtime_planner_reconcile", "error", { userId, error: e });
     console.warn("realtime planner reconciliation failed", e);
   }
 }
@@ -1088,6 +1123,7 @@ function applyRealtimeProfileRow(userId: string, row: unknown) {
     void loadProfile(userId)
       .then(() => render())
       .catch((e) => {
+        logPlannerSyncEvent("realtime_profile_refresh", "error", { userId, error: e });
         state.error = e instanceof Error ? e.message : String(e);
         render();
       });
@@ -1148,6 +1184,8 @@ function ensureRealtimeSyncSubscriptions(userId: string) {
 
 async function refreshBankData() {
   if (!state.session) return;
+  const userId = state.session.user.id;
+  const startedAt = Date.now();
   state.busy = true;
   state.error = null;
   render();
@@ -1162,6 +1200,11 @@ async function refreshBankData() {
     if (error) {
       const msg = await edgeFunctionMessage(error);
       if (isNoBankEnrollmentMessage(msg)) {
+        logPlannerSyncEvent("bank_refresh", "ok", {
+          userId,
+          durationMs: Date.now() - startedAt,
+          metadata: { enrollment: "none" },
+        });
         state.accounts = [];
         state.transactions = [];
         state.txAssignments = {};
@@ -1178,6 +1221,7 @@ async function refreshBankData() {
     state.accounts = payload.accounts ?? [];
     await syncTellerAccountsToPlanner(state.accounts as Record<string, unknown>[]);
   } catch (e) {
+    logPlannerSyncEvent("bank_refresh", "error", { userId, durationMs: Date.now() - startedAt, error: e });
     state.error = formatAuthError("Bank sync", e, { edgeFunction: "teller-data" });
     state.accounts = [];
     state.transactions = [];
@@ -1192,6 +1236,11 @@ async function refreshBankData() {
     state.selectedAccountId = first.id ?? null;
   }
   await loadTransactions();
+  logPlannerSyncEvent("bank_refresh", "ok", {
+    userId,
+    durationMs: Date.now() - startedAt,
+    metadata: { accountCount: state.accounts.length },
+  });
 }
 
 /**
@@ -1479,6 +1528,7 @@ async function loadNormalizedAndRecompute(options: { persist?: boolean } = { per
     state.normalizedSnapshot = null;
     return;
   }
+  const startedAt = Date.now();
   state.normalizedSnapshotBusy = true;
   state.normalizedSnapshotError = null;
   render();
@@ -1529,8 +1579,14 @@ async function loadNormalizedAndRecompute(options: { persist?: boolean } = { per
     } else {
       state.normalizedSnapshot = snapshot;
     }
+    logPlannerSyncEvent("planner_normalized_recompute", "ok", {
+      userId,
+      durationMs: Date.now() - startedAt,
+      metadata: { persisted: options.persist !== false },
+    });
   } catch (e) {
     console.error("loadNormalizedAndRecompute failed", e);
+    logPlannerSyncEvent("planner_normalized_recompute", "error", { userId, durationMs: Date.now() - startedAt, error: e });
     state.normalizedSnapshotError = e instanceof Error ? e.message : String(e);
   } finally {
     state.normalizedSnapshotBusy = false;
@@ -1539,6 +1595,8 @@ async function loadNormalizedAndRecompute(options: { persist?: boolean } = { per
 }
 
 async function withRecompute<T>(fn: () => Promise<T>, successMessage?: string): Promise<T | null> {
+  const startedAt = Date.now();
+  const userId = state.session?.user?.id;
   state.error = null;
   state.info = null;
   state.normalizedSnapshotBusy = true;
@@ -1546,9 +1604,11 @@ async function withRecompute<T>(fn: () => Promise<T>, successMessage?: string): 
   try {
     const result = await fn();
     await loadNormalizedAndRecompute({ persist: true });
+    logPlannerSyncEvent("planner_edit_recompute", "ok", { userId, durationMs: Date.now() - startedAt });
     if (successMessage) state.info = successMessage;
     return result;
   } catch (e) {
+    logPlannerSyncEvent("planner_edit_recompute", "error", { userId, durationMs: Date.now() - startedAt, error: e });
     state.error = e instanceof Error ? e.message : String(e);
     return null;
   } finally {
@@ -1559,6 +1619,8 @@ async function withRecompute<T>(fn: () => Promise<T>, successMessage?: string): 
 
 async function savePlannerSnapshotDraft() {
   if (!state.session?.user?.id) return;
+  const userId = state.session.user.id;
+  const startedAt = Date.now();
   let parsed: unknown;
   try {
     parsed = JSON.parse(state.plannerSnapshotDraft);
@@ -1575,7 +1637,7 @@ async function savePlannerSnapshotDraft() {
   state.error = null;
   render();
   const payload = {
-    user_id: state.session.user.id,
+    user_id: userId,
     snapshot,
     plan: null,
     source_platform: "web",
@@ -1591,6 +1653,7 @@ async function savePlannerSnapshotDraft() {
     .single();
   state.plannerSnapshotSaveBusy = false;
   if (error) {
+    logPlannerSyncEvent("planner_snapshot_save", "error", { userId, durationMs: Date.now() - startedAt, error });
     state.plannerSnapshotSaveError = error.message;
     render();
     return;
@@ -1598,11 +1661,13 @@ async function savePlannerSnapshotDraft() {
   state.plannerSnapshot = data ?? payload;
   state.plannerLoadError = null;
   try {
-    await replaceNormalizedPlannerFromSnapshot(state.session.user.id, snapshot);
+    await replaceNormalizedPlannerFromSnapshot(userId, snapshot);
     state.plannerSnapshotDirty = false;
     await loadNormalizedAndRecompute({ persist: true });
+    logPlannerSyncEvent("planner_snapshot_save", "ok", { userId, durationMs: Date.now() - startedAt });
     state.info = "Saved.";
   } catch (e) {
+    logPlannerSyncEvent("planner_snapshot_save", "error", { userId, durationMs: Date.now() - startedAt, error: e });
     state.plannerSnapshotSaveError = e instanceof Error ? e.message : String(e);
   }
   render();
@@ -2562,12 +2627,13 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
         <header class="fx-paycheck-stack__head">
           <div>
             <p class="fx-eyebrow">Paycheck-to-paycheck</p>
-            <h2>Each paycheck and what it covers</h2>
+            <h2>Next paychecks</h2>
           </div>
-          <p class="muted">Full plan through your <strong>${horizonDays}-day</strong> horizon (${paychecks.length} pay cycle${paychecks.length === 1 ? "" : "s"}), oldest to newest.</p>
+          <p class="muted">Simple view first. Open a paycheck for line-by-line details.</p>
         </header>
         ${paychecks.length > 0
-          ? `<div class="fx-paycheck-rail">${paychecks.map((p, i) => renderPaycheckCard(p, i + 1, paychecks.length)).join("")}</div>`
+          ? `<div class="fx-paycheck-rail">${paychecks.slice(0, 4).map((p, i) => renderPaycheckCard(p, i + 1, paychecks.length)).join("")}</div>
+             ${paychecks.length > 4 ? `<details class="fx-details"><summary>Show ${paychecks.length - 4} later paycheck${paychecks.length - 4 === 1 ? "" : "s"}</summary><div class="fx-paycheck-rail">${paychecks.slice(4).map((p, i) => renderPaycheckCard(p, i + 5, paychecks.length)).join("")}</div></details>` : ""}`
           : `<p class="muted">No upcoming paychecks yet. Add a paycheck in Settings.</p>`}
       </section>
   `;
@@ -2582,12 +2648,12 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
           <p class="fx-eyebrow">Planner</p>
           <p class="fx-paynow-hero__period">${escapeHtml(period.title)}</p>
           <h1 class="fx-planner-headline__title">Your paycheck-to-paycheck plan</h1>
-          <p class="muted">See what each paycheck covers, what needs to be held for later, and what is safe after the current plan. ${escapeHtml(heroDetail)}</p>
+          <p class="muted">Your bills and essentials are protected first. The amount marked safe is what is left after the required plan. ${escapeHtml(heroDetail)}</p>
           ${renderPlannerQuickLinks()}
         </div>
         <div class="fx-paynow-hero__stats">
           <div class="fx-paynow-stat ${shortAmount > 0 ? "is-risk" : ""}"><span>Status</span><strong>${escapeHtml(statusCopy)}</strong></div>
-          <div class="fx-paynow-stat"><span>Protected now</span><strong>${money(protectedTotal)}</strong></div>
+          <div class="fx-paynow-stat"><span>Safe to spend</span><strong>${money(safe)}</strong></div>
           <div class="fx-paynow-stat">
             <span>Next paycheck</span>
             <strong>${escapeHtml(paycheckDateLabel(nextPaycheck?.nextExpectedDate ?? undefined) || "—")}</strong>
@@ -2598,19 +2664,26 @@ function renderPlannerWorkspace(plannerState: PlannerStateRow | null, plan: Plan
         </div>
       </section>
 
-      ${renderPlannerSummarySection(state.normalizedSnapshot, plan, paychecks, period)}
-      ${paycheckPlanSection}
-
       <div class="fx-layout fx-layout--split">
-        ${renderPlannerBreakdownSection(plan, paychecks)}
-        ${renderPlannerAllocationSection(state.normalizedSnapshot, paychecks)}
+        ${renderPlannerRecommendedActions(plan)}
+        <section class="fx-panel">
+          <p class="fx-eyebrow">Pay first</p>
+          <h2>What needs attention</h2>
+          ${renderDueRecommendationList(plan.whatMustBePaidNow ?? [], "Nothing urgent right now.")}
+        </section>
       </div>
-
-      ${renderPlannerForecastSection(plan, paychecks)}
-
-      ${renderPlannerRecommendedActions(plan)}
-
+      ${paycheckPlanSection}
       ${renderWhatToDoWithLeftover(plan, safe, shortAmount)}
+
+      <details class="fx-details">
+        <summary>More plan details</summary>
+        ${renderPlannerSummarySection(state.normalizedSnapshot, plan, paychecks, period)}
+        <div class="fx-layout fx-layout--split">
+          ${renderPlannerBreakdownSection(plan, paychecks)}
+          ${renderPlannerAllocationSection(state.normalizedSnapshot, paychecks)}
+        </div>
+        ${renderPlannerForecastSection(plan, paychecks)}
+      </details>
     </div>
   `;
 }
@@ -3504,8 +3577,9 @@ function renderPaycheckCard(
       </header>
       <div class="fx-pay-body">
         ${deductionHtml}
-        ${bucketsHtml || `<p class="muted">Nothing to pay from this paycheck — all allocations cleared.</p>`}
-        ${reservesHtml}
+        ${grouped.size || reserves.length
+          ? `<details class="fx-details fx-details--compact"><summary>Show bill and reserve details</summary>${bucketsHtml}${reservesHtml}</details>`
+          : `<p class="muted">Nothing to pay from this paycheck — all allocations cleared.</p>`}
       </div>
       <footer class="fx-paycheck__foot">
         <span class="muted">Left over</span>
@@ -3576,9 +3650,9 @@ function renderBillsWorkspace(plan: PlannerPlan | null) {
             <h2>What can wait</h2>
             ${renderDueRecommendationList(plan.whatCanBeDelayed ?? [], "No delay candidates.")}
           </section>
-          <section class="fx-panel">
-            <p class="fx-eyebrow">Non-payday obligations</p>
-            <h2>Carry-forward + reserves</h2>
+          <details class="fx-panel fx-details">
+            <summary>More bill planning details</summary>
+            <p class="muted">Carry-forward items and reserves are kept here so the main Bills page stays focused on what to pay now.</p>
             ${renderDueRecommendationList(
               (plan.nonPaydayObligations ?? []).map((item) => ({
                 label: item.label,
@@ -3586,9 +3660,9 @@ function renderBillsWorkspace(plan: PlannerPlan | null) {
                 dueDate: item.effectiveDueDate,
                 rationale: `${item.status ?? "PLANNED"}${item.daysOverdue ? ` · ${item.daysOverdue}d overdue` : ""}`,
               })),
-              "No non-payday obligations queued.",
+              "No carry-forward or reserve items queued.",
             )}
-          </section>
+          </details>
         </div>
       </div>
     </div>
@@ -3650,19 +3724,22 @@ function renderAccountsWorkspace(
         <section class="fx-panel">
           <p class="fx-eyebrow">Activity</p>
           <h2>Transactions</h2>
-          <p class="muted" style="margin-top:0">Click <strong>Adjust</strong> on any transaction to tag it or split it across categories.</p>
-          <label class="field" style="margin-top:12px">
-            Search transactions
-            <input
-              id="accounts-tx-search"
-              type="search"
-              value="${escapeAttr(state.accountsTxSearch)}"
-              placeholder="Merchant, description, or category"
-            />
-          </label>
-          <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:8px">
-            ${txFilterButtons}
-          </div>
+          <p class="muted" style="margin-top:0">Review recent charges and tap <strong>Adjust</strong> only when A.Pay misses a bill or category.</p>
+          <details class="fx-details fx-details--compact">
+            <summary>Search and filters</summary>
+            <label class="field" style="margin-top:12px">
+              Search transactions
+              <input
+                id="accounts-tx-search"
+                type="search"
+                value="${escapeAttr(state.accountsTxSearch)}"
+                placeholder="Merchant, description, or category"
+              />
+            </label>
+            <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:8px">
+              ${txFilterButtons}
+            </div>
+          </details>
           <p class="muted" style="margin:10px 0 0">
             ${txTotalCount > 0 ? `Showing ${txVisibleCount} of ${txTotalCount} linked transactions.` : "No linked transactions loaded yet."}
           </p>
@@ -3911,7 +3988,7 @@ function renderPlannerPrefsSummary(snap: PlannerSnapshot): string {
         <div>
           <p class="fx-eyebrow">Planning</p>
           <h2>Planner preferences</h2>
-          <p class="muted">Scenario mode, horizon window, safety buffer, and advanced engine knobs.</p>
+          <p class="muted">Keep the simple defaults unless your pay or bills need a different planning style.</p>
         </div>
         <div class="fx-planner-head__actions">
           <button type="button" data-settings-add="planner-settings" class="secondary">Edit preferences</button>
@@ -3921,10 +3998,15 @@ function renderPlannerPrefsSummary(snap: PlannerSnapshot): string {
         <article class="fx-mini-list__item"><div><strong>Scenario</strong><p>${escapeHtml(snap.settings.selectedScenarioMode ?? "FIXED")}</p></div></article>
         <article class="fx-mini-list__item"><div><strong>Horizon</strong><p>${snap.settings.horizonDays ?? 120} days forecast</p></div></article>
         <article class="fx-mini-list__item"><div><strong>Safety buffer</strong><p>${money(snap.settings.targetBuffer ?? 0)}</p></div></article>
-        <article class="fx-mini-list__item"><div><strong>Style</strong><p>${escapeHtml(snap.settings.planningStyle ?? "BALANCED")}</p></div></article>
-        <article class="fx-mini-list__item"><div><strong>Safety floor cash</strong><p>${money(snap.settings.safetyFloorCash ?? 0)}</p></div></article>
-        <article class="fx-mini-list__item"><div><strong>Reserve window (days)</strong><p>${snap.settings.reserveNearFutureWindowDays ?? "—"}</p></div></article>
       </div>
+      <details class="fx-details">
+        <summary>Advanced planning controls</summary>
+        <div class="fx-mini-list">
+          <article class="fx-mini-list__item"><div><strong>Style</strong><p>${escapeHtml(snap.settings.planningStyle ?? "BALANCED")}</p></div></article>
+          <article class="fx-mini-list__item"><div><strong>Safety floor cash</strong><p>${money(snap.settings.safetyFloorCash ?? 0)}</p></div></article>
+          <article class="fx-mini-list__item"><div><strong>Reserve window</strong><p>${snap.settings.reserveNearFutureWindowDays ?? "—"} days</p></div></article>
+        </div>
+      </details>
     </section>
   `;
 }

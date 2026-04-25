@@ -3430,6 +3430,45 @@ a {
   margin-top: 10px;
 }
 
+.fx-details {
+  margin-top: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  border-radius: var(--radius-sm);
+  background: rgba(8, 12, 24, 0.28);
+}
+
+.fx-details > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 10px 12px;
+  font-weight: 700;
+  color: color-mix(in srgb, var(--accent) 78%, var(--text));
+}
+
+.fx-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.fx-details > summary::before {
+  content: "+";
+  display: inline-block;
+  width: 1.25em;
+  color: var(--muted);
+}
+
+.fx-details[open] > summary::before {
+  content: "-";
+}
+
+.fx-details > :not(summary) {
+  margin: 12px;
+}
+
+.fx-details--compact {
+  margin-top: 8px;
+  background: rgba(8, 12, 24, 0.18);
+}
+
 .fx-safexplain__fine {
   margin: 12px 0 0;
   font-size: 0.82rem;

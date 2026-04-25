@@ -95,6 +95,17 @@ interface SnapshotHousingBucket { id: string; label: string; monthKey: string; a
 interface SnapshotHousingPayment { id: string; bucketId: string; amount: number; paymentDate: string }
 interface SnapshotGoal { id: string; name: string; targetAmount: number; currentAmount: number; isActive?: boolean }
 interface SnapshotCashAdjustment { id: string; accountId?: string | null; type: string; amount: number; adjustmentDate: string }
+interface SnapshotDeductionRule {
+  id: string;
+  name: string;
+  scope?: "GLOBAL" | "INCOME_SOURCE";
+  incomeSourceId?: string | null;
+  valueType?: "PERCENTAGE" | "FIXED_AMOUNT";
+  fixedAmount?: number;
+  percentage?: number;
+  status?: string;
+  isEnabledByDefault?: boolean;
+}
 interface PlannerSettings {
   targetBuffer?: number;
   safetyFloorCash?: number;
@@ -120,6 +131,7 @@ interface PlannerSnapshot {
   housingPayments: SnapshotHousingPayment[];
   goals: SnapshotGoal[];
   cashAdjustments: SnapshotCashAdjustment[];
+  deductionRules: SnapshotDeductionRule[];
   settings: PlannerSettings;
 }
 
@@ -211,7 +223,7 @@ interface PlannerPlan {
 }
 
 const PLANNER_SCHEMA_VERSION = "billpayer-shared-v1";
-const PLANNER_ENGINE_VERSION = "ts-engine-0.2.1";
+const PLANNER_ENGINE_VERSION = "ts-engine-0.2.2";
 const DEFAULT_HORIZON_DAYS = 120;
 const DUE_SOON_WINDOW_DAYS = 14;
 const DEFAULT_RESERVE_NEAR_FUTURE_DAYS = 21;
@@ -410,6 +422,27 @@ function scenarioAmount(range: MonetaryRange, mode: PlannerScenarioMode): number
   }
 }
 
+function deductionRulesForIncome(snapshot: PlannerSnapshot, incomeSourceId: string): SnapshotDeductionRule[] {
+  return (snapshot.deductionRules ?? []).filter((rule) => {
+    if (rule.isEnabledByDefault === false) return false;
+    if ((rule.status ?? "MANDATORY").toUpperCase() === "DISABLED") return false;
+    const scope = (rule.scope ?? "GLOBAL").toUpperCase();
+    return scope === "GLOBAL" || rule.incomeSourceId === incomeSourceId;
+  });
+}
+
+function deductionAmountForIncome(snapshot: PlannerSnapshot, source: SnapshotIncomeSource, grossOrNetAmount: number): number {
+  if ((source.inputMode ?? "USABLE") === "USABLE") return 0;
+  const total = deductionRulesForIncome(snapshot, source.id).reduce((sum, rule) => {
+    if ((rule.valueType ?? "PERCENTAGE") === "FIXED_AMOUNT") {
+      return sum + Math.max(0, rule.fixedAmount ?? 0);
+    }
+    const pct = Math.max(0, rule.percentage ?? 0);
+    return sum + (grossOrNetAmount * (pct / 100));
+  }, 0);
+  return money(Math.min(Math.max(0, total), Math.max(0, grossOrNetAmount)));
+}
+
 interface ForecastPaycheck {
   id: string; incomeSourceId: string | null; payerLabel: string;
   date: Date; usableAmount: number; forecastedAmount: number;
@@ -430,6 +463,8 @@ function forecastPaychecks(snapshot: PlannerSnapshot, mode: PlannerScenarioMode,
     const rule = source.recurringRule;
     if (!rule) continue;
     const amt = scenarioAmount(source.amountRange, mode);
+    const deductionAmount = deductionAmountForIncome(snapshot, source, amt);
+    const usableAmount = money(Math.max(0, amt - deductionAmount));
     const anchoredRule: RecurringRule = {
       ...rule,
       anchorDate: source.nextExpectedPayDate ?? rule.anchorDate,
@@ -447,10 +482,10 @@ function forecastPaychecks(snapshot: PlannerSnapshot, mode: PlannerScenarioMode,
         incomeSourceId: source.id,
         payerLabel: source.payerLabel || source.name,
         date,
-        usableAmount: entered ? money(entered.amount) : amt,
+        usableAmount: entered ? money(entered.amount) : usableAmount,
         forecastedAmount: amt,
         enteredAmount: entered ? money(entered.amount) : null,
-        deductionAmount: 0,
+        deductionAmount: entered ? 0 : deductionAmount,
       });
     }
   }
@@ -1107,14 +1142,14 @@ async function loadPlannerSnapshot(client: SupabaseClient, userId: string): Prom
     accounts, incomeSources, paychecks, paycheckActions, bills, billPayments,
     debts, debtTransactions, expenses, expenseSpends,
     housingConfig, housingBuckets, housingPayments,
-    goals, cashAdjustments, settings,
+    goals, cashAdjustments, deductionRules, settings,
   ] = await Promise.all([
     filter("bank_accounts"), filter("income_sources"), filter("paychecks"),
     filter("paycheck_actions"),
     filter("bills"), filter("bill_payments"), filter("debts"), filter("debt_transactions"),
     filter("recurring_expenses"), filter("expense_spends"),
     filter("housing_config"), filter("housing_buckets"), filter("housing_payments"),
-    filter("goals"), filter("cash_adjustments"), filter("planner_settings"),
+    filter("goals"), filter("cash_adjustments"), filter("deduction_rules"), filter("planner_settings"),
   ]);
 
   const first = (r: { data: unknown[] | null }): Record<string, unknown> | null =>
@@ -1254,6 +1289,20 @@ async function loadPlannerSnapshot(client: SupabaseClient, userId: string): Prom
         adjustmentDate: String(dateOr(r.adjustment_date) ?? ""),
       };
     }),
+    deductionRules: (deductionRules.data ?? []).map((raw) => {
+      const r = raw as Record<string, unknown>;
+      return {
+        id: String(r.id ?? ""),
+        name: String(r.name ?? ""),
+        scope: (r.scope as "GLOBAL" | "INCOME_SOURCE") ?? "GLOBAL",
+        incomeSourceId: r.income_source_id ? String(r.income_source_id) : null,
+        valueType: (r.value_type as "PERCENTAGE" | "FIXED_AMOUNT") ?? "PERCENTAGE",
+        fixedAmount: numOr(r.fixed_amount, 0),
+        percentage: numOr(r.percentage, 0),
+        status: String(r.status ?? "MANDATORY"),
+        isEnabledByDefault: r.is_enabled_by_default !== false,
+      };
+    }),
     settings: {
       targetBuffer: numOr(rawSettings.targetBuffer, 0),
       safetyFloorCash: numOr(rawSettings.safetyFloorCash ?? rawSettings.safety_floor_cash, 0),
@@ -1266,6 +1315,31 @@ async function loadPlannerSnapshot(client: SupabaseClient, userId: string): Prom
       ),
     },
   };
+}
+
+async function logPlannerSyncEvent(
+  client: SupabaseClient,
+  userId: string,
+  eventType: string,
+  status: "ok" | "error",
+  startedAt: number,
+  error?: unknown,
+  metadata: Record<string, unknown> = {},
+): Promise<void> {
+  try {
+    const errorMessage = error instanceof Error ? error.message : error == null ? null : String(error);
+    await client.from("planner_sync_events").insert({
+      user_id: userId,
+      source_platform: "edge",
+      event_type: eventType,
+      status,
+      duration_ms: Date.now() - startedAt,
+      error_message: errorMessage,
+      metadata,
+    });
+  } catch (logError) {
+    console.warn("planner sync event log failed", logError);
+  }
 }
 
 // =============================================================
@@ -1282,6 +1356,7 @@ Deno.serve(async (req) => {
   if (userErr || !userData.user) return jsonResponse({ error: "Unauthorized" }, 401, req);
   const userId = userData.user.id;
   const admin = supabaseServiceClient();
+  const startedAt = Date.now();
 
   try {
     const snapshot = await loadPlannerSnapshot(admin, userId);
@@ -1296,8 +1371,12 @@ Deno.serve(async (req) => {
       updated_at: nowIso,
     }, { onConflict: "user_id" });
     if (upsertErr) {
+      await logPlannerSyncEvent(admin, userId, "edge_planner_recompute", "error", startedAt, upsertErr);
       return jsonResponse({ error: `Failed to persist plan: ${upsertErr.message}` }, 500, req);
     }
+    await logPlannerSyncEvent(admin, userId, "edge_planner_recompute", "ok", startedAt, undefined, {
+      engineVersion: PLANNER_ENGINE_VERSION,
+    });
     return jsonResponse({
       plan,
       planner_schema_version: PLANNER_SCHEMA_VERSION,
@@ -1305,6 +1384,7 @@ Deno.serve(async (req) => {
       recomputed_at: nowIso,
     }, 200, req);
   } catch (e) {
+    await logPlannerSyncEvent(admin, userId, "edge_planner_recompute", "error", startedAt, e);
     return jsonResponse({ error: e instanceof Error ? e.message : String(e) }, 500, req);
   }
 });

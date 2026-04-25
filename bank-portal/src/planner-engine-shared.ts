@@ -297,7 +297,7 @@ export interface PlannerSnapshot {
 }
 
 export const PLANNER_SCHEMA_VERSION = "billpayer-shared-v1";
-export const PLANNER_ENGINE_VERSION = "ts-engine-0.2.1";
+export const PLANNER_ENGINE_VERSION = "ts-engine-0.2.2";
 
 const DEFAULT_HORIZON_DAYS = 120;
 const DUE_SOON_WINDOW_DAYS = 14;
@@ -511,6 +511,31 @@ function scenarioAmount(range: MonetaryRange, mode: PlannerScenarioMode): number
   }
 }
 
+function deductionRulesForIncome(snapshot: PlannerSnapshot, incomeSourceId: string): SnapshotDeductionRule[] {
+  return (snapshot.deductionRules ?? []).filter((rule) => {
+    if (rule.isEnabledByDefault === false) return false;
+    if ((rule.status ?? "MANDATORY").toUpperCase() === "DISABLED") return false;
+    const scope = (rule.scope ?? "GLOBAL").toUpperCase();
+    return scope === "GLOBAL" || rule.incomeSourceId === incomeSourceId;
+  });
+}
+
+function deductionAmountForIncome(
+  snapshot: PlannerSnapshot,
+  source: SnapshotIncomeSource,
+  grossOrNetAmount: number,
+): number {
+  if ((source.inputMode ?? "USABLE") === "USABLE") return 0;
+  const total = deductionRulesForIncome(snapshot, source.id).reduce((sum, rule) => {
+    if ((rule.valueType ?? "PERCENTAGE") === "FIXED_AMOUNT") {
+      return sum + Math.max(0, rule.fixedAmount ?? 0);
+    }
+    const pct = Math.max(0, rule.percentage ?? 0);
+    return sum + (grossOrNetAmount * (pct / 100));
+  }, 0);
+  return money(Math.min(Math.max(0, total), Math.max(0, grossOrNetAmount)));
+}
+
 interface ForecastPaycheck {
   id: string;
   incomeSourceId: string | null;
@@ -519,6 +544,7 @@ interface ForecastPaycheck {
   usableAmount: number;
   forecastedAmount: number;
   enteredAmount: number | null;
+  deductionAmount: number;
 }
 
 interface ForecastObligation {
@@ -545,6 +571,8 @@ function forecastPaychecks(
     const rule = source.recurringRule;
     if (!rule) continue;
     const amt = scenarioAmount(source.amountRange, mode);
+    const deductionAmount = deductionAmountForIncome(snapshot, source, amt);
+    const usableAmount = money(Math.max(0, amt - deductionAmount));
     const anchoredRule: RecurringRule = {
       ...rule,
       anchorDate: source.nextExpectedPayDate ?? rule.anchorDate,
@@ -562,9 +590,10 @@ function forecastPaychecks(
         incomeSourceId: source.id,
         payerLabel: source.payerLabel || source.name,
         date,
-        usableAmount: entered ? money(entered.amount) : amt,
+        usableAmount: entered ? money(entered.amount) : usableAmount,
         forecastedAmount: amt,
         enteredAmount: entered ? money(entered.amount) : null,
+        deductionAmount: entered ? 0 : deductionAmount,
       });
     }
   }
@@ -579,6 +608,7 @@ function forecastPaychecks(
       usableAmount: money(p.amount),
       forecastedAmount: money(p.amount),
       enteredAmount: money(p.amount),
+      deductionAmount: p.deductionAmount,
     });
   }
   return out.sort((a, b) => a.date.getTime() - b.date.getTime());
